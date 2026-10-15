@@ -1,0 +1,314 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#000000">
+<title>Spacedesk Linux</title>
+<style>
+  :root { --fg: #e8e8e8; --muted: #9a9a9a; --panel: rgba(20, 20, 20, .82); --accent: #4f8cff; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: #000; color: var(--fg); overflow: hidden;
+    font: 14px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  #screen { position: fixed; inset: 0; display: grid; place-items: center; touch-action: none; }
+  #screen > video, #screen > canvas { width: 100%; height: 100%; object-fit: contain; display: none; }
+  #status { position: fixed; inset: 0; display: grid; place-items: center; text-align: center;
+    padding: 16px; pointer-events: none; }
+  #status div { background: var(--panel); padding: 16px 20px; border-radius: 12px; max-width: 420px; }
+  #status small { color: var(--muted); display: block; margin-top: 6px; }
+  #menu-btn { position: fixed; top: 8px; right: 8px; width: 40px; height: 40px; border-radius: 50%;
+    border: 0; background: var(--panel); color: var(--fg); font-size: 20px; opacity: .35; z-index: 3; }
+  #menu-btn:hover, #menu-btn:focus-visible { opacity: 1; }
+  #menu { position: fixed; top: 56px; right: 8px; background: var(--panel); border-radius: 12px;
+    padding: 6px; display: none; flex-direction: column; min-width: 200px; z-index: 3; }
+  #menu.open { display: flex; }
+  #menu button { background: none; border: 0; color: var(--fg); text-align: left; padding: 10px 12px;
+    border-radius: 8px; font: inherit; }
+  #menu button:hover { background: rgba(255, 255, 255, .08); }
+  #stats { color: var(--muted); padding: 6px 12px 4px; font: 12px ui-monospace, monospace; }
+  #kbd { position: fixed; left: -1000px; top: 0; opacity: 0; width: 10px; height: 10px; }
+</style>
+</head>
+<body>
+<div id="screen"><video id="video" autoplay playsinline muted></video><canvas id="canvas"></canvas></div>
+<div id="status"><div><span id="status-text">Conectando…</span><small id="status-hint"></small></div></div>
+<button id="menu-btn" aria-label="Menú">⋮</button>
+<div id="menu">
+  <button data-act="fullscreen">Pantalla completa</button>
+  <button data-act="keyboard">Teclado</button>
+  <button data-act="mode">Cambiar transporte</button>
+  <button data-act="reconnect">Reconectar</button>
+  <div id="stats">–</div>
+</div>
+<textarea id="kbd" autocapitalize="off" autocomplete="off" spellcheck="false"></textarea>
+<script>
+"use strict";
+// ── Configuración ─────────────────────────────────────────────────────────
+// Transporte: "ws" (WebSocket + WebCodecs, ideal por USB/localhost) o
+// "webrtc" (LAN). WebCodecs exige contexto seguro (https o localhost).
+const params = new URLSearchParams(location.search);
+const canWebCodecs = window.isSecureContext && "VideoDecoder" in window;
+let mode = params.get("mode") || (canWebCodecs ? "ws" : "webrtc");
+const httpBase = location.origin;
+const wsBase = httpBase.replace(/^http/, "ws");
+
+const $ = (id) => document.getElementById(id);
+const video = $("video"), canvas = $("canvas"), screenEl = $("screen");
+const ctx2d = canvas.getContext("2d", { alpha: false, desynchronized: true });
+let session = null;          // { close() }
+let reconnectTimer = null;
+const stats = { frames: 0, bytes: 0, last: performance.now(), text: "–" };
+
+function status(text, hint = "") {
+  $("status").style.display = text ? "grid" : "none";
+  $("status-text").textContent = text || "";
+  $("status-hint").textContent = hint;
+}
+
+function scheduleReconnect(why) {
+  if (session) { session.close(); session = null; }
+  status("Desconectado", why + " · reintentando…");
+  clearTimeout(reconnectTimer);
+  reconnectTimer = setTimeout(connect, 1500);
+}
+
+function connect() {
+  clearTimeout(reconnectTimer);
+  if (session) session.close();
+  video.style.display = canvas.style.display = "none";
+  status("Conectando…", mode === "ws" ? "WebSocket + WebCodecs" : "WebRTC");
+  session = mode === "ws" ? startWebSocket() : startWebRTC();
+  connectInput();
+}
+
+// ── Transporte 1: WebSocket + WebCodecs ──────────────────────────────────
+function avcCodecFromAnnexB(buf) {
+  // Busca el SPS (nal_unit_type 7) y construye "avc1.PPCCLL".
+  for (let i = 0; i + 4 < buf.length; i++) {
+    if (buf[i] === 0 && buf[i + 1] === 0 && buf[i + 2] === 1 && (buf[i + 3] & 0x1f) === 7) {
+      const hex = (b) => b.toString(16).padStart(2, "0");
+      return "avc1." + hex(buf[i + 4]) + hex(buf[i + 5]) + hex(buf[i + 6]);
+    }
+  }
+  return null;
+}
+
+function startWebSocket() {
+  if (!canWebCodecs) {
+    status("WebCodecs no disponible", "Abre por http://localhost (USB) o usa el modo WebRTC.");
+    return { close() {} };
+  }
+  const ws = new WebSocket(wsBase + "/ws/video");
+  ws.binaryType = "arraybuffer";
+  let decoder = null, configured = null, waitKey = true, closed = false;
+
+  const newDecoder = () => new VideoDecoder({
+    output(frame) {
+      if (canvas.width !== frame.displayWidth || canvas.height !== frame.displayHeight) {
+        canvas.width = frame.displayWidth; canvas.height = frame.displayHeight;
+      }
+      ctx2d.drawImage(frame, 0, 0);
+      frame.close();
+      if (canvas.style.display !== "block") { canvas.style.display = "block"; status(""); }
+      stats.frames++;
+    },
+    error(e) { console.error(e); configured = null; waitKey = true; requestKey(); },
+  });
+  const requestKey = () => { if (ws.readyState === 1) ws.send("keyframe"); };
+
+  ws.onmessage = (ev) => {
+    if (typeof ev.data === "string") return; // {"type":"config",...}
+    const bytes = new Uint8Array(ev.data);
+    const key = (bytes[0] & 1) === 1;
+    const pts = Number(new DataView(ev.data).getBigUint64(1));
+    const payload = bytes.subarray(9);
+    stats.bytes += bytes.length;
+
+    if (key) {
+      const codec = avcCodecFromAnnexB(payload);
+      if (codec && codec !== configured) {
+        if (!decoder || decoder.state === "closed") decoder = newDecoder();
+        decoder.configure({ codec, optimizeForLatency: true, hardwareAcceleration: "no-preference" });
+        configured = codec;
+      }
+      waitKey = false;
+    }
+    if (waitKey || !configured) return;
+    // Si el decodificador se atrasa, se descarta hasta el próximo keyframe.
+    if (decoder.decodeQueueSize > 4) { waitKey = true; requestKey(); return; }
+    decoder.decode(new EncodedVideoChunk({ type: key ? "key" : "delta", timestamp: pts, data: payload }));
+  };
+  ws.onclose = () => { if (!closed) scheduleReconnect("Conexión de vídeo cerrada"); };
+  return {
+    close() { closed = true; ws.close(); if (decoder && decoder.state !== "closed") decoder.close(); },
+  };
+}
+
+// ── Transporte 2: WebRTC ─────────────────────────────────────────────────
+function startWebRTC() {
+  const pc = new RTCPeerConnection({ iceServers: [] });
+  let closed = false;
+  const tr = pc.addTransceiver("video", { direction: "recvonly" });
+  try {
+    const caps = RTCRtpReceiver.getCapabilities("video").codecs;
+    const h264 = caps.filter((c) => /h264/i.test(c.mimeType));
+    if (h264.length) tr.setCodecPreferences(h264);
+  } catch (_) {}
+
+  pc.ontrack = (ev) => {
+    try { ev.receiver.jitterBufferTarget = 0; ev.receiver.playoutDelayHint = 0; } catch (_) {}
+    video.srcObject = ev.streams[0] || new MediaStream([ev.track]);
+    video.play().catch(() => {});
+  };
+  video.onplaying = () => { video.style.display = "block"; status(""); };
+  pc.onconnectionstatechange = () => {
+    if (!closed && ["failed", "disconnected", "closed"].includes(pc.connectionState))
+      scheduleReconnect("WebRTC " + pc.connectionState);
+  };
+
+  (async () => {
+    await pc.setLocalDescription(await pc.createOffer());
+    await new Promise((resolve) => {            // señalización sin trickle
+      if (pc.iceGatheringState === "complete") return resolve();
+      const t = setTimeout(resolve, 1500);
+      pc.onicegatheringstatechange = () => {
+        if (pc.iceGatheringState === "complete") { clearTimeout(t); resolve(); }
+      };
+    });
+    const res = await fetch(httpBase + "/offer", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: pc.localDescription.type, sdp: pc.localDescription.sdp }),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    await pc.setRemoteDescription(await res.json());
+  })().catch((e) => { if (!closed) scheduleReconnect(String(e.message || e)); });
+
+  const statTimer = setInterval(async () => {
+    const r = await pc.getStats();
+    r.forEach((s) => {
+      if (s.type === "inbound-rtp" && s.kind === "video") {
+        stats.frames = s.framesDecoded - (stats.rtcBase ?? s.framesDecoded);
+        stats.rtcBase = s.framesDecoded;
+        stats.bytes = s.bytesReceived - (stats.rtcBytes ?? s.bytesReceived);
+        stats.rtcBytes = s.bytesReceived;
+      }
+    });
+  }, 1000);
+
+  return { close() { closed = true; clearInterval(statTimer); pc.close(); stats.rtcBase = stats.rtcBytes = undefined; } };
+}
+
+// ── Entrada: ratón, táctil y teclado ─────────────────────────────────────
+let inputWs = null;
+function connectInput() {
+  if (inputWs && inputWs.readyState <= 1) return;
+  inputWs = new WebSocket(wsBase + "/ws/input");
+  inputWs.onclose = () => setTimeout(connectInput, 1500);
+}
+const send = (ev) => { if (inputWs && inputWs.readyState === 1) inputWs.send(JSON.stringify(ev)); };
+
+// Convierte coordenadas de pantalla a 0..1 sobre la imagen (descontando bandas negras).
+function norm(e) {
+  const el = mode === "ws" ? canvas : video;
+  const vw = mode === "ws" ? canvas.width : video.videoWidth;
+  const vh = mode === "ws" ? canvas.height : video.videoHeight;
+  const r = el.getBoundingClientRect();
+  if (!vw || !vh) return null;
+  const scale = Math.min(r.width / vw, r.height / vh);
+  const w = vw * scale, h = vh * scale;
+  const x = (e.clientX - r.left - (r.width - w) / 2) / w;
+  const y = (e.clientY - r.top - (r.height - h) / 2) / h;
+  return { x: Math.min(1, Math.max(0, x)), y: Math.min(1, Math.max(0, y)) };
+}
+
+const touchSlots = new Map();
+function slotFor(id) {
+  if (!touchSlots.has(id)) {
+    let s = 0; const used = new Set(touchSlots.values());
+    while (used.has(s)) s++;
+    touchSlots.set(id, s);
+  }
+  return touchSlots.get(id);
+}
+
+screenEl.addEventListener("pointerdown", (e) => {
+  const p = norm(e); if (!p) return;
+  screenEl.setPointerCapture(e.pointerId);
+  if (e.pointerType === "touch") send({ t: "touch_down", id: slotFor(e.pointerId), ...p });
+  else { send({ t: "move", ...p }); send({ t: "button", b: e.button, down: true }); }
+  e.preventDefault();
+});
+screenEl.addEventListener("pointermove", (e) => {
+  const p = norm(e); if (!p) return;
+  if (e.pointerType === "touch") {
+    if (touchSlots.has(e.pointerId)) send({ t: "touch_move", id: touchSlots.get(e.pointerId), ...p });
+  } else send({ t: "move", ...p });
+});
+const pointerEnd = (e) => {
+  if (e.pointerType === "touch") {
+    if (touchSlots.has(e.pointerId)) { send({ t: "touch_up", id: touchSlots.get(e.pointerId) }); touchSlots.delete(e.pointerId); }
+  } else if (e.type === "pointerup") send({ t: "button", b: e.button, down: false });
+};
+screenEl.addEventListener("pointerup", pointerEnd);
+screenEl.addEventListener("pointercancel", pointerEnd);
+screenEl.addEventListener("contextmenu", (e) => e.preventDefault());
+screenEl.addEventListener("wheel", (e) => {
+  send({ t: "wheel", dy: Math.sign(e.deltaY), dx: Math.sign(e.deltaX) });
+  e.preventDefault();
+}, { passive: false });
+
+const KEYSYMS = { Enter: 0xff0d, Backspace: 0xff08, Tab: 0xff09, Escape: 0xff1b, Delete: 0xffff,
+  Home: 0xff50, End: 0xff57, PageUp: 0xff55, PageDown: 0xff56, ArrowLeft: 0xff51, ArrowUp: 0xff52,
+  ArrowRight: 0xff53, ArrowDown: 0xff54, Shift: 0xffe1, Control: 0xffe3, Alt: 0xffe9, Meta: 0xffeb,
+  CapsLock: 0xffe5, Insert: 0xff63, F1: 0xffbe, F2: 0xffbf, F3: 0xffc0, F4: 0xffc1, F5: 0xffc2,
+  F6: 0xffc3, F7: 0xffc4, F8: 0xffc5, F9: 0xffc6, F10: 0xffc7, F11: 0xffc8, F12: 0xffc9 };
+const keysymOf = (key) => {
+  if (KEYSYMS[key]) return KEYSYMS[key];
+  if ([...key].length !== 1) return 0;
+  const cp = key.codePointAt(0);
+  return cp < 0x100 ? cp : 0x01000000 + cp;
+};
+const kbd = $("kbd");
+window.addEventListener("keydown", (e) => {
+  const k = keysymOf(e.key); if (!k || e.isComposing) return;
+  send({ t: "key", keysym: k, down: true }); e.preventDefault();
+});
+window.addEventListener("keyup", (e) => {
+  const k = keysymOf(e.key); if (!k || e.isComposing) return;
+  send({ t: "key", keysym: k, down: false }); e.preventDefault();
+});
+// Teclados virtuales de Android no emiten keydown fiables: se usa el texto insertado.
+kbd.addEventListener("input", (e) => {
+  if (e.inputType === "deleteContentBackward") {
+    send({ t: "key", keysym: 0xff08, down: true }); send({ t: "key", keysym: 0xff08, down: false });
+  } else if (e.data) {
+    for (const ch of e.data) { const k = keysymOf(ch); send({ t: "key", keysym: k, down: true }); send({ t: "key", keysym: k, down: false }); }
+  }
+  kbd.value = "";
+});
+
+// ── Menú ─────────────────────────────────────────────────────────────────
+$("menu-btn").onclick = () => $("menu").classList.toggle("open");
+$("menu").onclick = (e) => {
+  const act = e.target.dataset && e.target.dataset.act; if (!act) return;
+  $("menu").classList.remove("open");
+  if (act === "fullscreen") {
+    if (document.fullscreenElement) document.exitFullscreen();
+    else document.documentElement.requestFullscreen({ navigationUI: "hide" }).catch(() => {});
+  } else if (act === "keyboard") { kbd.focus(); }
+  else if (act === "mode") { mode = mode === "ws" ? "webrtc" : "ws"; connect(); }
+  else if (act === "reconnect") connect();
+};
+
+setInterval(() => {
+  const now = performance.now(), dt = (now - stats.last) / 1000;
+  $("stats").textContent = `${mode} · ${(stats.frames / dt).toFixed(0)} fps · ${(stats.bytes * 8 / dt / 1e6).toFixed(1)} Mbit/s`;
+  if (mode === "ws") { stats.frames = 0; stats.bytes = 0; }
+  stats.last = now;
+}, 1000);
+
+connect();
+</script>
+</body>
+</html>

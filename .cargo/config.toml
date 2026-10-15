@@ -1,0 +1,4 @@
+# Cabeceras de PipeWire extraídas localmente (ver scripts/setup-deps.sh).
+# Si instalas pipewire-devel en el sistema puedes borrar este bloque.
+[env]
+PKG_CONFIG_PATH = { value = ".deps/usr/lib64/pkgconfig", relative = true }

@@ -1,0 +1,6 @@
+/target
+/.deps
+/android/build
+/android/*.apk
+/android/debug.keystore
+/android/*.idsig

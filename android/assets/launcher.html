@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Spacedesk Linux</title>
+<style>
+  :root { --bg: #0d1117; --card: #161b22; --fg: #e6edf3; --muted: #8b949e; --accent: #4f8cff; --ok: #3fb950; --line: #30363d; }
+  * { box-sizing: border-box; }
+  body { margin: 0; min-height: 100vh; background: var(--bg); color: var(--fg); display: grid; place-items: center;
+    font: 15px/1.45 system-ui, Roboto, sans-serif; padding: 16px; }
+  main { width: 100%; max-width: 760px; display: grid; gap: 16px; grid-template-columns: 1fr 1fr; }
+  h1 { grid-column: 1 / -1; margin: 0; font-size: 20px; font-weight: 600; }
+  h1 small { display: block; color: var(--muted); font-weight: 400; font-size: 13px; }
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 16px; display: grid; gap: 10px; align-content: start; }
+  h2 { margin: 0; font-size: 15px; }
+  p { margin: 0; color: var(--muted); font-size: 13px; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); margin-right: 6px; }
+  .dot.ok { background: var(--ok); }
+  input, button { font: inherit; border-radius: 10px; border: 1px solid var(--line); padding: 10px 12px; }
+  input { background: var(--bg); color: var(--fg); width: 100%; }
+  button { background: var(--accent); color: #fff; border: 0; font-weight: 600; }
+  button:disabled { opacity: .45; }
+  .row { display: flex; gap: 8px; }
+  .row input:last-child { max-width: 90px; }
+  #msg { grid-column: 1 / -1; color: #f0883e; font-size: 13px; min-height: 1em; }
+  @media (max-width: 560px) { main { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<main>
+  <h1>Spacedesk Linux<small>Ejecuta <code>linux-spacedesk-clone</code> en el PC y elige cómo conectar.</small></h1>
+  <section>
+    <h2>USB</h2>
+    <p>Activa la depuración USB y conecta el cable. El servidor configura <code>adb reverse</code> automáticamente.</p>
+    <p id="usb-state"><span class="dot"></span>Buscando PC…</p>
+    <button id="usb-btn" disabled>Conectar por USB</button>
+  </section>
+  <section>
+    <h2>WiFi</h2>
+    <p>Misma red que el PC. Usa la IP que muestra el servidor.</p>
+    <div class="row"><input id="host" placeholder="192.168.1.50" inputmode="decimal" autocomplete="off"><input id="port" value="8787" inputmode="numeric"></div>
+    <button id="wifi-btn">Conectar por WiFi</button>
+  </section>
+  <div id="msg"></div>
+</main>
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const store = { get(k, d) { try { return localStorage.getItem(k) ?? d; } catch (_) { return d; } },
+                set(k, v) { try { localStorage.setItem(k, v); } catch (_) {} } };
+$("host").value = store.get("host", "");
+$("port").value = store.get("port", "8787");
+// Al volver con "atrás" no se reconecta solo; tras un error sí.
+const auto = location.hash !== "#manual";
+if (location.hash === "#error") $("msg").textContent = "Se perdió la conexión con el PC. Reintentando…";
+
+async function probe(host, port) {
+  const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), 1200);
+  try { const r = await fetch(`http://${host}:${port}/info`, { signal: ctl.signal, cache: "no-store" }); return r.ok ? await r.json() : null; }
+  catch (_) { return null; } finally { clearTimeout(t); }
+}
+// "localhost" es contexto seguro: el visor podrá usar WebCodecs (menor latencia).
+const go = (host, port) => { location.href = `http://${host}:${port}/`; };
+
+async function pollUsb() {
+  const port = $("port").value || "8787";
+  const info = await probe("localhost", port);
+  $("usb-state").innerHTML = info
+    ? `<span class="dot ok"></span>PC detectado · ${info.width}×${info.height} @ ${info.fps} fps`
+    : `<span class="dot"></span>Buscando PC por USB…`;
+  $("usb-btn").disabled = !info;
+  if (info && auto) return go("localhost", port);
+  setTimeout(pollUsb, 1500);
+}
+$("usb-btn").onclick = () => go("localhost", $("port").value || "8787");
+$("wifi-btn").onclick = async () => {
+  const host = $("host").value.trim(), port = $("port").value.trim() || "8787";
+  if (!host) { $("msg").textContent = "Escribe la IP del PC."; return; }
+  store.set("host", host); store.set("port", port);
+  $("msg").textContent = "Conectando…";
+  if (await probe(host, port)) go(host, port);
+  else $("msg").textContent = `No se pudo contactar con ${host}:${port}. ¿Está el servidor en marcha y el cortafuegos abierto?`;
+};
+pollUsb();
+</script>
+</body>
+</html>
