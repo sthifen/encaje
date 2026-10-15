@@ -1,0 +1,51 @@
+#!/bin/sh
+# Lanzador de Spacedesk Linux.
+#
+# El servidor no tiene ventana: si se abre desde el menú de aplicaciones (sin
+# terminal), se vuelve a lanzar dentro de una terminal para ver la IP y el
+# estado. Cerrar la terminal cierra el monitor virtual.
+#
+# Opciones por defecto en ~/.config/spacedesk-linux.conf, p. ej.:
+#   --width 2340 --height 1080 --fps 60
+# (o en la variable SPACEDESK_ARGS). Los argumentos de la línea de órdenes
+# se añaden después.
+
+HERE="$(dirname "$(readlink -f "$0")")"
+BIN="$HERE/linux-spacedesk-clone"
+[ -x "$BIN" ] || BIN="$HERE/usr/bin/linux-spacedesk-clone" # dentro del AppImage
+# Dentro de un AppImage hay que relanzar el .AppImage (el montaje temporal
+# desaparece cuando este proceso termina).
+SELF="${APPIMAGE:-$(readlink -f "$0")}"
+CONF="${XDG_CONFIG_HOME:-$HOME/.config}/spacedesk-linux.conf"
+
+# Las terminales (ptyxis, gnome-terminal…) no heredan el entorno, así que
+# el relanzamiento se marca con un argumento.
+if [ "${1:-}" = "--in-terminal" ]; then
+    shift
+    "$BIN" "$@"
+    status=$?
+    printf '\nSpacedesk Linux terminó (código %s). Pulsa Enter para cerrar.' "$status"
+    read -r _
+    exit "$status"
+fi
+
+DEFAULTS="${SPACEDESK_ARGS:-}"
+[ -z "$DEFAULTS" ] && [ -f "$CONF" ] && DEFAULTS="$(grep -v '^#' "$CONF" | tr '\n' ' ')"
+# shellcheck disable=SC2086
+set -- $DEFAULTS "$@"
+
+if [ -t 1 ]; then
+    exec "$BIN" "$@"
+fi
+
+if command -v xdg-terminal-exec >/dev/null; then exec xdg-terminal-exec "$SELF" --in-terminal "$@"; fi
+if command -v ptyxis >/dev/null; then exec ptyxis --new-window -- "$SELF" --in-terminal "$@"; fi
+if command -v kgx >/dev/null; then exec kgx -- "$SELF" --in-terminal "$@"; fi
+if command -v gnome-terminal >/dev/null; then exec gnome-terminal -- "$SELF" --in-terminal "$@"; fi
+if command -v konsole >/dev/null; then exec konsole -e "$SELF" --in-terminal "$@"; fi
+if command -v xterm >/dev/null; then exec xterm -e "$SELF" --in-terminal "$@"; fi
+
+# Sin terminal disponible: ejecutar igualmente, avisando por notificación.
+command -v notify-send >/dev/null &&
+    notify-send "Spacedesk Linux" "Servidor en marcha en el puerto 8787"
+exec "$BIN" "$@"

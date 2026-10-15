@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Spacedesk Linux
+GenericName=Monitor virtual
+Comment=Usa tu móvil o tablet como segunda pantalla (USB o WiFi)
+Exec=spacedesk-linux
+Icon=spacedesk-linux
+Terminal=false
+Categories=Utility;
+Keywords=monitor;pantalla;display;spacedesk;android;
+StartupNotify=false

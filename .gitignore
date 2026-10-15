@@ -4,3 +4,4 @@
 /android/*.apk
 /android/debug.keystore
 /android/*.idsig
+/dist

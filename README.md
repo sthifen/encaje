@@ -12,7 +12,32 @@ Mutter RecordVirtual ──► PipeWire ──► H.264 (NVENC / VA-API / OpenH2
 Visor ──(táctil, ratón, teclado)──► WebSocket ──► Mutter RemoteDesktop
 ```
 
-## Uso rápido
+## Instalación (sin compilar)
+
+Descarga de la [última release](../../releases/latest):
+
+- **`Spacedesk_Linux-*-x86_64.AppImage`**: un solo archivo.
+  `chmod +x Spacedesk_Linux-*.AppImage` y ábrelo con doble clic.
+- **`spacedesk-linux-*-x86_64.tar.gz`**: binario + acceso directo del menú.
+  Descomprime y ejecuta `./install.sh` (instala en `~/.local`, sin sudo;
+  `./install.sh --uninstall` lo quita).
+- **`spacedesk-linux.apk`**: la app del móvil.
+
+Al abrirlo desde el menú se abre una terminal con la IP y el estado; al
+cerrarla se cierra el monitor virtual. Para fijar la resolución de tu móvil,
+crea `~/.config/spacedesk-linux.conf` con, por ejemplo:
+
+```
+--width 2340 --height 1080 --fps 60
+```
+
+Requisitos: GNOME sobre Wayland con PipeWire y GStreamer (vienen de serie).
+Para codificar con la GPU NVIDIA hace falta el plugin `nvcodec` de
+`gstreamer1-plugins-bad`; si no está, se usa la CPU.
+
+Los paquetes se generan con `packaging/build-dist.sh`.
+
+## Compilar desde el código
 
 ```bash
 scripts/setup-deps.sh          # una vez: cabeceras de PipeWire sin sudo
