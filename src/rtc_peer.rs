@@ -177,9 +177,13 @@ async fn pump(
     keyreq.request();
     let mut synced = false;
     let mut last_pts: Option<u64> = None;
+    // WebRTC va por UDP y no se leen los PLI del navegador: un keyframe cada
+    // 2 s garantiza que una pérdida no congele la imagen más de eso.
+    let mut refresh = tokio::time::interval(Duration::from_secs(2));
 
     loop {
         tokio::select! {
+            _ = refresh.tick() => keyreq.request(),
             state = state_rx.recv() => match state {
                 Some(RTCPeerConnectionState::Connected) | Some(RTCPeerConnectionState::Connecting) => {}
                 _ => return Ok(()),

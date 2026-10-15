@@ -59,6 +59,19 @@ El servidor ejecuta `adb reverse tcp:8787 tcp:8787` en cada móvil conectado
 (y lo repite si el móvil se reconecta). Por USB se usa WebSocket +
 WebCodecs, porque `adb reverse` sólo reenvía TCP.
 
+**Si va lento por USB, revisa el cable.** Con un cable de mala calidad
+(o sólo de carga a medias) el móvil negocia USB 1.1 a 12 Mbit/s en lugar de
+480 Mbit/s. Compruébalo con:
+
+```bash
+cat /sys/bus/usb/devices/*/speed  # junto al dispositivo SAMSUNG_Android, etc.
+lsusb -t                          # el móvil debería aparecer con 480M
+```
+
+Aun así el servidor se adapta: el visor confirma cada frame, el servidor
+mide el retraso real y baja el bitrate antes de que se acumule (con un
+enlace simulado de 7 Mbit/s el retraso de cola pasa de ~3 s a ~11 ms).
+
 ### Móvil o tablet por WiFi
 
 En la app, escribe la IP del PC en el recuadro *WiFi*, o abre

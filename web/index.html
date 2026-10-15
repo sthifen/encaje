@@ -124,6 +124,9 @@ function startWebSocket() {
     const pts = Number(new DataView(ev.data).getBigUint64(1));
     const payload = bytes.subarray(9);
     stats.bytes += bytes.length;
+    // Confirmación de llegada: el servidor ajusta el bitrate a lo que el
+    // enlace (USB/WiFi) entrega de verdad y evita acumular retraso.
+    ws.send(JSON.stringify({ ack: pts }));
 
     if (key) {
       const codec = avcCodecFromAnnexB(payload);

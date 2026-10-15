@@ -5,8 +5,10 @@
 //!   WebCodecs. Funciona sobre TCP, así que pasa por `adb reverse` (USB).
 //! * `GET  /ws/input`   – eventos de ratón/táctil/teclado en JSON.
 
+use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use axum::Json;
 use axum::Router;
@@ -21,7 +23,7 @@ use tokio::sync::{broadcast, mpsc};
 use webrtc::peer_connection::RTCSessionDescription;
 
 use crate::display::InputEvent;
-use crate::encoder::{EncodedFrame, KeyframeRequest};
+use crate::encoder::{BitrateControl, ClientRate, EncodedFrame, KeyframeRequest};
 
 const INDEX_HTML: &str = include_str!("../web/index.html");
 
@@ -29,6 +31,7 @@ const INDEX_HTML: &str = include_str!("../web/index.html");
 pub struct AppState {
     pub frames: broadcast::Sender<EncodedFrame>,
     pub keyreq: KeyframeRequest,
+    pub rate: Arc<BitrateControl>,
     pub input: mpsc::UnboundedSender<InputEvent>,
     pub width: u32,
     pub height: u32,
@@ -92,21 +95,33 @@ async fn ws_video(
 }
 
 /// Cada mensaje binario: [flags u8 (bit0 = keyframe)][pts µs u64 BE][Annex-B].
+///
+/// El visor responde `{"ack": pts}` al recibir cada frame. Con eso se mide lo
+/// que de verdad atraviesa el enlace (adb por USB, WiFi…) y se evita encolar:
+/// si hay demasiado en vuelo se saltan frames y se baja el bitrate, en lugar
+/// de acumular segundos de retraso en búferes de TCP/adb.
 async fn stream_video(mut socket: WebSocket, s: Arc<AppState>) {
     let hello = json!({ "type": "config", "width": s.width, "height": s.height, "fps": s.fps });
     if socket.send(Message::Text(hello.to_string().into())).await.is_err() {
         return;
     }
     let mut frames = s.frames.subscribe();
+    let mut flow = Flow::new(s.rate.register(), s.rate.max_kbps());
     s.keyreq.request();
     let mut synced = false;
+    let mut key_requested = true;
     loop {
         tokio::select! {
             msg = socket.recv() => match msg {
                 Some(Ok(Message::Close(_))) | None | Some(Err(_)) => return,
-                Some(Ok(Message::Text(t))) if t.as_str() == "keyframe" => {
-                    synced = false;
-                    s.keyreq.request();
+                Some(Ok(Message::Text(t))) => {
+                    if t.as_str() == "keyframe" {
+                        synced = false;
+                        key_requested = true;
+                        s.keyreq.request();
+                    } else if let Ok(Ack { ack }) = serde_json::from_str::<Ack>(&t) {
+                        flow.on_ack(ack);
+                    }
                 }
                 _ => {}
             },
@@ -116,12 +131,25 @@ async fn stream_video(mut socket: WebSocket, s: Arc<AppState>) {
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         tracing::debug!("visor atrasado {n} frames, resincronizando");
                         synced = false;
-                        s.keyreq.request();
+                        key_requested = false;
                         continue;
                     }
                     Err(broadcast::error::RecvError::Closed) => return,
                 };
+                flow.tick();
+                if flow.congested() {
+                    // Saltar este frame rompe la cadena de referencias: hará
+                    // falta un keyframe, pero sólo cuando se vacíe el enlace.
+                    flow.on_skip();
+                    synced = false;
+                    key_requested = false;
+                    continue;
+                }
                 if !synced && !frame.keyframe {
+                    if !key_requested && flow.drained() {
+                        s.keyreq.request();
+                        key_requested = true;
+                    }
                     continue;
                 }
                 synced = true;
@@ -129,11 +157,147 @@ async fn stream_video(mut socket: WebSocket, s: Arc<AppState>) {
                 buf.put_u8(frame.keyframe as u8);
                 buf.put_u64(frame.pts_us);
                 buf.extend_from_slice(&frame.data);
+                flow.on_send(frame.pts_us, buf.len());
                 if socket.send(Message::Binary(buf.freeze())).await.is_err() {
                     return;
                 }
             }
         }
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct Ack {
+    ack: u64,
+}
+
+/// Control de congestión de un visor WebSocket, guiado por el retraso
+/// (como el de WebRTC): el retraso envío→ack crece antes de perder nada, así
+/// que se baja el bitrate en cuanto sube y sólo se saltan frames si se dispara.
+struct Flow {
+    rate: ClientRate,
+    max_kbps: u32,
+    /// (pts, bytes, enviado) de los frames sin confirmar.
+    inflight: VecDeque<(u64, usize, Instant)>,
+    inflight_bytes: usize,
+    /// Activo desde el primer ack (un visor antiguo sin acks no se limita).
+    acks_seen: bool,
+    cap_kbps: u32,
+    delivered: usize,
+    window: Instant,
+    goodput_kbps: f64,
+    skipped_in_window: bool,
+    /// Mayor retraso envío→confirmación en la ventana actual.
+    max_delay: Duration,
+}
+
+impl Flow {
+    /// Edad máxima del frame más antiguo sin confirmar antes de saltar frames.
+    const MAX_DELAY: Duration = Duration::from_millis(300);
+    /// Por encima: bajar el bitrate. Por debajo de la mitad: subirlo.
+    const TARGET_DELAY: Duration = Duration::from_millis(80);
+
+    fn new(rate: ClientRate, max_kbps: u32) -> Self {
+        Self {
+            rate,
+            max_kbps,
+            inflight: VecDeque::new(),
+            inflight_bytes: 0,
+            acks_seen: false,
+            cap_kbps: max_kbps,
+            delivered: 0,
+            window: Instant::now(),
+            goodput_kbps: 0.0,
+            skipped_in_window: false,
+            max_delay: Duration::ZERO,
+        }
+    }
+
+    fn on_send(&mut self, pts: u64, bytes: usize) {
+        self.inflight.push_back((pts, bytes, Instant::now()));
+        self.inflight_bytes += bytes;
+    }
+
+    fn on_ack(&mut self, pts: u64) {
+        self.acks_seen = true;
+        while let Some(&(p, bytes, _)) = self.inflight.front() {
+            if p > pts {
+                break;
+            }
+            if let Some((_, _, sent)) = self.inflight.pop_front() {
+                self.max_delay = self.max_delay.max(sent.elapsed());
+            }
+            self.inflight_bytes -= bytes;
+            self.delivered += bytes;
+        }
+    }
+
+    /// Bytes que caben en vuelo: lo que el enlace entrega en MAX_DELAY.
+    fn budget(&self) -> usize {
+        let kbps = self.cap_kbps.max(crate::encoder::MIN_KBPS) as f64;
+        ((kbps * 1000.0 / 8.0 * Self::MAX_DELAY.as_secs_f64()) as usize).max(96 * 1024)
+    }
+
+    fn congested(&self) -> bool {
+        self.acks_seen
+            && (self.inflight_bytes > self.budget()
+                || self.inflight.front().is_some_and(|f| f.2.elapsed() > Self::MAX_DELAY))
+    }
+
+    fn drained(&self) -> bool {
+        !self.acks_seen || self.inflight_bytes < self.budget() / 2
+    }
+
+    /// Salto de frames = congestión fuerte: bajar a lo que de verdad se
+    /// entrega (si se midió) y como mucho al 75 %.
+    fn on_skip(&mut self) {
+        if self.skipped_in_window {
+            return; // una reducción por ventana
+        }
+        self.skipped_in_window = true;
+        let cap = self.cap_kbps as f64;
+        let new = (self.goodput_kbps * 0.85).max(cap * 0.6).min(cap * 0.75);
+        self.set_cap(new as u32);
+    }
+
+    /// Cada 500 ms: medir lo entregado y ajustar según el retraso.
+    fn tick(&mut self) {
+        let dt = self.window.elapsed().as_secs_f64();
+        if dt < 0.5 {
+            return;
+        }
+        let measured = self.delivered as f64 * 8.0 / dt / 1000.0;
+        self.goodput_kbps = if self.goodput_kbps == 0.0 {
+            measured
+        } else {
+            0.6 * self.goodput_kbps + 0.4 * measured
+        };
+        if self.acks_seen && !self.skipped_in_window {
+            if self.max_delay > Self::TARGET_DELAY {
+                self.set_cap(self.cap_kbps * 85 / 100);
+            } else if self.max_delay < Self::TARGET_DELAY / 2 && self.cap_kbps < self.max_kbps {
+                self.set_cap(self.cap_kbps + (self.cap_kbps / 10).max(250));
+            }
+        }
+        tracing::debug!(
+            "visor: entregado {measured:.0} kbit/s, límite {} kbit/s, retraso máx {:?}, en vuelo {} KB",
+            self.cap_kbps,
+            self.max_delay,
+            self.inflight_bytes / 1024
+        );
+        self.delivered = 0;
+        self.max_delay = Duration::ZERO;
+        self.window = Instant::now();
+        self.skipped_in_window = false;
+    }
+
+    fn set_cap(&mut self, kbps: u32) {
+        let kbps = kbps.clamp(crate::encoder::MIN_KBPS, self.max_kbps);
+        if kbps != self.cap_kbps {
+            tracing::debug!("visor: límite {kbps} kbit/s (entregado {:.0})", self.goodput_kbps);
+        }
+        self.cap_kbps = kbps;
+        self.rate.set(kbps);
     }
 }
 

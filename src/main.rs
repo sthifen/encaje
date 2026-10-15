@@ -30,7 +30,7 @@ struct Args {
     /// Fotogramas por segundo
     #[arg(long, default_value_t = 60)]
     fps: u32,
-    /// Bitrate de vídeo en kbit/s
+    /// Bitrate máximo en kbit/s (baja solo si la red no da para más)
     #[arg(long, default_value_t = 12000)]
     bitrate: u32,
     /// Codificador H.264
@@ -72,6 +72,7 @@ async fn main() -> Result<()> {
     capture::spawn(display.node_id, width, height, args.fps, slot.clone());
     let (frames_tx, _) = broadcast::channel(8);
     let keyreq = encoder::KeyframeRequest::default();
+    let rate = encoder::BitrateControl::new(args.bitrate);
     encoder::spawn(
         slot,
         frames_tx.clone(),
@@ -80,6 +81,7 @@ async fn main() -> Result<()> {
             kind: args.encoder,
             fps: args.fps,
             bitrate_kbps: args.bitrate,
+            rate: rate.clone(),
         },
     );
 
@@ -101,6 +103,7 @@ async fn main() -> Result<()> {
     let state = server::AppState {
         frames: frames_tx,
         keyreq,
+        rate,
         input: input_tx,
         width,
         height,

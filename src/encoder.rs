@@ -9,7 +9,8 @@
 //! En modo `auto` se prueba cada backend de hardware codificando un frame
 //! real antes de usarlo; si falla, se pasa al siguiente.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -50,13 +51,67 @@ pub enum EncoderKind {
 pub struct EncoderSettings {
     pub kind: EncoderKind,
     pub fps: u32,
+    /// Bitrate actual; lo ajusta [`BitrateControl`] según la red.
     pub bitrate_kbps: u32,
+    pub rate: Arc<BitrateControl>,
 }
 
 impl EncoderSettings {
-    /// IDR periódico para que WebRTC se recupere de pérdidas sin PLI.
+    /// Sin IDR periódico: por WebSocket (TCP) no hay pérdidas, y un keyframe
+    /// a destiempo es un pico enorme en un enlace lento. Los visores WebRTC
+    /// piden keyframes ellos mismos (ver `rtc_peer.rs`).
     fn gop(&self) -> u32 {
-        self.fps * 2
+        self.fps * 600
+    }
+}
+
+/// Bitrate objetivo compartido. Cada visor con control de congestión publica
+/// cuánto aguanta su enlace; el codificador usa el mínimo (acotado al máximo
+/// configurado). Por USB 1.1 o WiFi saturado baja solo, en vez de acumular
+/// segundos de retraso en los búferes.
+pub struct BitrateControl {
+    max_kbps: u32,
+    caps: Mutex<HashMap<u64, u32>>,
+    next_id: AtomicU64,
+}
+
+pub const MIN_KBPS: u32 = 800;
+
+impl BitrateControl {
+    pub fn new(max_kbps: u32) -> Arc<Self> {
+        Arc::new(Self { max_kbps, caps: Mutex::default(), next_id: AtomicU64::new(0) })
+    }
+
+    pub fn max_kbps(&self) -> u32 {
+        self.max_kbps
+    }
+
+    /// Registra un visor; al soltar el [`ClientRate`] deja de contar.
+    pub fn register(self: &Arc<Self>) -> ClientRate {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        ClientRate { ctl: self.clone(), id }
+    }
+
+    fn target_kbps(&self) -> u32 {
+        let caps = self.caps.lock().unwrap();
+        caps.values().copied().min().unwrap_or(self.max_kbps).clamp(MIN_KBPS, self.max_kbps)
+    }
+}
+
+pub struct ClientRate {
+    ctl: Arc<BitrateControl>,
+    id: u64,
+}
+
+impl ClientRate {
+    pub fn set(&self, kbps: u32) {
+        self.ctl.caps.lock().unwrap().insert(self.id, kbps);
+    }
+}
+
+impl Drop for ClientRate {
+    fn drop(&mut self) {
+        self.ctl.caps.lock().unwrap().remove(&self.id);
     }
 }
 
@@ -107,6 +162,10 @@ trait Backend {
     fn matches(&self, f: &RawFrame) -> bool;
     /// Envía el frame al codificador. `false` si se descartó y hay que reintentar.
     fn encode(&mut self, f: &RawFrame, force_key: bool, pts: Duration) -> Result<bool>;
+    /// Cambia el bitrate sin reiniciar. `false` si el backend no lo admite.
+    fn set_bitrate(&mut self, _kbps: u32) -> bool {
+        false
+    }
 }
 
 // ── OpenH264 (CPU) ──────────────────────────────────────────────────────────
@@ -171,6 +230,9 @@ struct GstBackend {
     name: &'static str,
     pipeline: gst::Pipeline,
     src: gst_app::AppSrc,
+    /// Codificador NVENC, cuyo bitrate se puede cambiar en marcha.
+    nvenc: Option<gst::Element>,
+    vbv: u32,
     size: (usize, usize),
     order: PixelOrder,
 }
@@ -179,6 +241,8 @@ impl GstBackend {
     fn new(kind: EncoderKind, s: &EncoderSettings, f: &RawFrame, out: Output) -> Result<Self> {
         gst::init()?;
         let (w, h, fps, kbps, gop) = (f.width, f.height, s.fps, s.bitrate_kbps, s.gop());
+        let vbv = vbv_kbits(kbps);
+        let va_gop = gop.min(1024);
         // Cola de 2 frames que descarta los más viejos si la GPU se atrasa.
         let input = format!(
             "appsrc name=src is-live=true format=time do-timestamp=false \
@@ -194,8 +258,8 @@ impl GstBackend {
             EncoderKind::Nvenc => (
                 "NVENC (GPU NVIDIA)",
                 format!(
-                    "{input} ! nvh264enc preset=p1 tune=ultra-low-latency rc-mode=cbr \
-                     bitrate={kbps} gop-size={gop} bframes=0 zerolatency=true \
+                    "{input} ! nvh264enc name=enc preset=p1 tune=ultra-low-latency rc-mode=cbr \
+                     bitrate={kbps} vbv-buffer-size={vbv} gop-size={gop} bframes=0 zerolatency=true \
                      repeat-sequence-header=true \
                      ! video/x-h264,profile=constrained-baseline,{caps} ! {output}"
                 ),
@@ -204,7 +268,7 @@ impl GstBackend {
                 "VA-API (GPU)",
                 format!(
                     "{input} ! videoconvert ! video/x-raw,format=NV12 \
-                     ! vah264enc rate-control=cbr bitrate={kbps} key-int-max={gop} b-frames=0 \
+                     ! vah264enc rate-control=cbr bitrate={kbps} key-int-max={va_gop} b-frames=0 \
                      target-usage=7 ! h264parse config-interval=-1 ! video/x-h264,{caps} ! {output}"
                 ),
             ),
@@ -243,7 +307,8 @@ impl GstBackend {
         );
         pipeline.set_state(gst::State::Playing)?;
 
-        let mut me = Self { name, pipeline, src, size: (w, h), order: f.order };
+        let nvenc = pipeline.by_name("enc");
+        let mut me = Self { name, pipeline, src, nvenc, vbv, size: (w, h), order: f.order };
         // Prueba real: el pipeline debe producir un keyframe con este frame.
         me.encode(f, true, Duration::ZERO)?;
         let deadline = Instant::now() + Duration::from_secs(3);
@@ -277,6 +342,19 @@ impl Backend for GstBackend {
         self.size == (f.width, f.height) && self.order == f.order
     }
 
+    fn set_bitrate(&mut self, kbps: u32) -> bool {
+        let Some(enc) = &self.nvenc else { return false };
+        enc.set_property("bitrate", kbps);
+        // Cambiar el VBV reinicia NVENC (= keyframe): sólo si el bitrate se
+        // ha alejado más de 2× del que lo fijó.
+        let vbv = vbv_kbits(kbps);
+        if vbv > self.vbv * 2 || vbv * 2 < self.vbv {
+            enc.set_property("vbv-buffer-size", vbv);
+            self.vbv = vbv;
+        }
+        true
+    }
+
     fn encode(&mut self, f: &RawFrame, force_key: bool, pts: Duration) -> Result<bool> {
         self.check_bus()?;
         if force_key {
@@ -300,6 +378,12 @@ impl Drop for GstBackend {
     fn drop(&mut self) {
         let _ = self.pipeline.set_state(gst::State::Null);
     }
+}
+
+/// Búfer VBV de ~250 ms: acota el tamaño de cada frame (incluidos los IDR)
+/// para que un keyframe no bloquee un enlace lento durante medio segundo.
+fn vbv_kbits(kbps: u32) -> u32 {
+    (kbps / 4).max(200)
 }
 
 fn create_backend(s: &EncoderSettings, f: &RawFrame, out: &Output) -> Result<Box<dyn Backend>> {
@@ -371,6 +455,7 @@ fn run(
     let interval = Duration::from_secs_f64(1.0 / settings.fps.max(1) as f64);
     let mut last_encode = Instant::now() - interval;
     let mut pending = false;
+    let mut last_rate_change = Instant::now();
 
     loop {
         let wait = if pending {
@@ -402,6 +487,22 @@ fn run(
             drop(backend.take()); // liberar la GPU antes de crear otro
             backend = Some(create_backend(&settings, frame, &out)?);
             keyreq.request();
+        }
+        let target = settings.rate.target_kbps();
+        let enc = backend.as_mut().unwrap();
+        if target.abs_diff(settings.bitrate_kbps) * 8 > settings.bitrate_kbps {
+            // Cambio > 12 %: en vivo si se puede; si no (CPU), recrear como
+            // mucho cada 2 s (el reinicio cuesta un IDR).
+            if enc.set_bitrate(target) {
+                tracing::info!("bitrate → {target} kbit/s");
+                settings.bitrate_kbps = target;
+            } else if last_rate_change.elapsed() > Duration::from_secs(2) {
+                tracing::info!("bitrate → {target} kbit/s (reiniciando codificador)");
+                settings.bitrate_kbps = target;
+                last_rate_change = Instant::now();
+                backend = None;
+                continue;
+            }
         }
         let enc = backend.as_mut().unwrap();
 
