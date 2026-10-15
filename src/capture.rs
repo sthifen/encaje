@@ -291,14 +291,21 @@ fn video_format_pod(width: u32, height: u32, fps: u32) -> Result<Vec<u8>> {
             Rectangle,
             pw::spa::utils::Rectangle { width, height }
         ),
+        // Como gnome-remote-desktop: frames a ritmo variable (sólo cuando hay
+        // cambios) con un máximo explícito.
         pw::spa::pod::property!(
             FormatProperties::VideoFramerate,
+            Fraction,
+            pw::spa::utils::Fraction { num: 0, denom: 1 }
+        ),
+        pw::spa::pod::property!(
+            FormatProperties::VideoMaxFramerate,
             Choice,
             Range,
             Fraction,
             pw::spa::utils::Fraction { num: fps, denom: 1 },
-            pw::spa::utils::Fraction { num: 0, denom: 1 },
-            pw::spa::utils::Fraction { num: 240, denom: 1 }
+            pw::spa::utils::Fraction { num: 1, denom: 1 },
+            pw::spa::utils::Fraction { num: fps, denom: 1 }
         ),
     );
     Ok(pw::spa::pod::serialize::PodSerializer::serialize(
