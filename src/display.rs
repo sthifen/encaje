@@ -121,8 +121,6 @@ pub struct VirtualDisplay {
     remote: RemoteDesktopSessionProxy<'static>,
     stream_path: String,
     pub node_id: u32,
-    pub width: u32,
-    pub height: u32,
 }
 
 impl VirtualDisplay {
@@ -195,8 +193,6 @@ impl VirtualDisplay {
             remote,
             stream_path: stream_path.to_string(),
             node_id,
-            width,
-            height,
         })
     }
 
@@ -204,8 +200,9 @@ impl VirtualDisplay {
         let _ = self.remote.stop().await;
     }
 
-    pub async fn inject(&self, ev: InputEvent) -> Result<()> {
-        let (w, h) = (self.width as f64, self.height as f64);
+    /// `size`: tamaño actual del monitor virtual (las coordenadas llegan 0..1).
+    pub async fn inject(&self, ev: InputEvent, size: (u32, u32)) -> Result<()> {
+        let (w, h) = (size.0 as f64, size.1 as f64);
         let s = self.stream_path.as_str();
         match ev {
             InputEvent::Move { x, y } => {

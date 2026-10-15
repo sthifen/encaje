@@ -24,11 +24,11 @@ Descarga de la [última release](../../releases/latest):
 - **`spacedesk-linux.apk`**: la app del móvil.
 
 Al abrirlo desde el menú se abre una terminal con la IP y el estado; al
-cerrarla se cierra el monitor virtual. Para fijar la resolución de tu móvil,
-crea `~/.config/spacedesk-linux.conf` con, por ejemplo:
+cerrarla se cierra el monitor virtual. Opciones por defecto (ver
+[Opciones](#opciones)) en `~/.config/spacedesk-linux.conf`, por ejemplo:
 
 ```
---width 2340 --height 1080 --fps 60
+--fps 60 --bitrate 20000
 ```
 
 Requisitos: GNOME sobre Wayland con PipeWire y GStreamer (vienen de serie).
@@ -77,11 +77,32 @@ enlace simulado de 7 Mbit/s el retraso de cola pasa de ~3 s a ~11 ms).
 En la app, escribe la IP del PC en el recuadro *WiFi*, o abre
 `http://IP-DEL-PC:8787` en cualquier navegador. Se usa WebRTC.
 
+## Resolución y rendimiento
+
+La resolución del monitor virtual **se adapta a la pantalla que se conecta**:
+el visor envía su tamaño en píxeles físicos y su orientación, y Mutter cambia
+el modo del monitor en caliente (al girar una tablet también). Así cada
+dispositivo recibe su proporción exacta, sin bandas negras.
+
+En el menú del visor (⋮ → *Resolución*):
+
+| Opción | Píxeles (móvil 2340×1080) | |
+|---|---|---|
+| Nativa | 2340×1080 | Máxima nitidez |
+| 75 % | 1755×810 | ~56 % de los píxeles |
+| 50 % | 1170×540 | ~25 % de los píxeles; ideal para enlaces lentos |
+| Otra… | la que escribas | p. ej. `1600x900` |
+
+Bajar la escala reduce el trabajo en **todas** las etapas (GNOME dibuja menos,
+la GPU codifica menos y viaja menos por USB/WiFi); la imagen se estira a
+pantalla completa, y los textos y ventanas se ven más grandes. La elección se
+guarda en cada dispositivo. Si se conectan varios a la vez, manda el último.
+
 ## Opciones
 
 | Opción | Por defecto | |
 |---|---|---|
-| `--width`, `--height` | 1920×1080 | Resolución del monitor virtual. Usa la del móvil en horizontal. |
+| `--width`, `--height` | automática | Fija la resolución e ignora la de los visores. |
 | `--fps` | 60 | Límite de fotogramas por segundo. |
 | `--bitrate` | 12000 | kbit/s. |
 | `--encoder` | `auto` | `nvenc`, `vaapi`, `openh264`. `auto` prueba el hardware y usa la CPU si falla. |

@@ -6,7 +6,7 @@
 //! va atrasado, los frames viejos se descartan en lugar de acumular latencia.
 //! La conversión de color la hace cada codificador (GPU en NVENC).
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -96,32 +96,80 @@ impl FrameSlot {
     }
 }
 
+/// Tamaño actual del monitor virtual (el negociado con Mutter). Lo leen la
+/// inyección de entrada y `/info`.
+#[derive(Default)]
+pub struct Geometry {
+    width: AtomicU32,
+    height: AtomicU32,
+}
+
+impl Geometry {
+    pub fn get(&self) -> (u32, u32) {
+        (self.width.load(Ordering::Relaxed), self.height.load(Ordering::Relaxed))
+    }
+
+    fn set(&self, w: u32, h: u32) {
+        self.width.store(w, Ordering::Relaxed);
+        self.height.store(h, Ordering::Relaxed);
+    }
+}
+
+/// Permite pedir otra resolución desde fuera del hilo de PipeWire.
+#[derive(Clone)]
+pub struct Capture {
+    resize_tx: pw::channel::Sender<(u32, u32)>,
+    pub geometry: Arc<Geometry>,
+}
+
+impl Capture {
+    /// Renegocia el formato con el nuevo tamaño; Mutter cambia el modo del
+    /// monitor virtual en caliente (como hace gnome-remote-desktop).
+    pub fn resize(&self, width: u32, height: u32) {
+        let _ = self.resize_tx.send((width, height));
+    }
+}
+
 struct StreamState {
     format: spa::param::video::VideoInfoRaw,
     slot: Arc<FrameSlot>,
+    geometry: Arc<Geometry>,
 }
 
 /// Lanza el hilo de captura conectado al nodo `node_id`.
-pub fn spawn(node_id: u32, width: u32, height: u32, fps: u32, slot: Arc<FrameSlot>) {
+pub fn spawn(node_id: u32, width: u32, height: u32, fps: u32, slot: Arc<FrameSlot>) -> Capture {
+    let (resize_tx, resize_rx) = pw::channel::channel();
+    let geometry = Arc::new(Geometry::default());
+    geometry.set(width, height);
+    let geo = geometry.clone();
     std::thread::Builder::new()
         .name("pipewire-capture".into())
         .spawn(move || {
-            if let Err(e) = run(node_id, width, height, fps, slot) {
+            if let Err(e) = run(node_id, width, height, fps, slot, geo, resize_rx) {
                 tracing::error!("captura PipeWire terminó con error: {e:#}");
                 std::process::exit(1);
             }
         })
         .expect("no se pudo crear el hilo de captura");
+    Capture { resize_tx, geometry }
 }
 
-fn run(node_id: u32, width: u32, height: u32, fps: u32, slot: Arc<FrameSlot>) -> Result<()> {
+fn run(
+    node_id: u32,
+    width: u32,
+    height: u32,
+    fps: u32,
+    slot: Arc<FrameSlot>,
+    geometry: Arc<Geometry>,
+    resize_rx: pw::channel::Receiver<(u32, u32)>,
+) -> Result<()> {
     pw::init();
     let mainloop = pw::main_loop::MainLoopRc::new(None)?;
     let context = pw::context::ContextRc::new(&mainloop, None)?;
     let core = context.connect_rc(None)?;
 
-    let stream = pw::stream::StreamBox::new(
-        &core,
+    let stream = pw::stream::StreamRc::new(
+        core,
         "spacedesk-linux-capture",
         pw::properties::properties! {
             *pw::keys::MEDIA_TYPE => "Video",
@@ -130,7 +178,7 @@ fn run(node_id: u32, width: u32, height: u32, fps: u32, slot: Arc<FrameSlot>) ->
         },
     )?;
 
-    let state = StreamState { format: Default::default(), slot };
+    let state = StreamState { format: Default::default(), slot, geometry };
 
     let _listener = stream
         .add_local_listener_with_user_data(state)
@@ -144,6 +192,7 @@ fn run(node_id: u32, width: u32, height: u32, fps: u32, slot: Arc<FrameSlot>) ->
             }
             if state.format.parse(param).is_ok() {
                 let s = state.format.size();
+                state.geometry.set(s.width, s.height);
                 tracing::info!(
                     "formato negociado: {:?} {}x{} @ {}/{}",
                     state.format.format(),
@@ -200,6 +249,18 @@ fn run(node_id: u32, width: u32, height: u32, fps: u32, slot: Arc<FrameSlot>) ->
         pw::stream::StreamFlags::AUTOCONNECT | pw::stream::StreamFlags::MAP_BUFFERS,
         &mut params,
     )?;
+
+    let resizer = stream.clone();
+    let _resize = resize_rx.attach(mainloop.loop_(), move |(w, h)| {
+        tracing::info!("cambiando el monitor virtual a {w}x{h}");
+        let r = video_format_pod(w, h, fps).map_err(|e| e.to_string()).and_then(|bytes| {
+            let pod = Pod::from_bytes(&bytes).ok_or("pod inválido")?;
+            resizer.update_params(&mut [pod]).map_err(|e| e.to_string())
+        });
+        if let Err(e) = r {
+            tracing::warn!("no se pudo cambiar la resolución: {e}");
+        }
+    });
 
     mainloop.run();
     Ok(())

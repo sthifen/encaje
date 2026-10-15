@@ -26,6 +26,10 @@
   #menu button { background: none; border: 0; color: var(--fg); text-align: left; padding: 10px 12px;
     border-radius: 8px; font: inherit; }
   #menu button:hover { background: rgba(255, 255, 255, .08); }
+  .menu-label { color: var(--muted); font-size: 12px; padding: 8px 12px 2px; }
+  .seg { display: flex; gap: 2px; padding: 0 6px 6px; }
+  #menu .seg button { flex: 1; text-align: center; padding: 8px 6px; font-size: 13px; }
+  #menu .seg button.on { background: var(--accent); color: #fff; }
   #stats { color: var(--muted); padding: 6px 12px 4px; font: 12px ui-monospace, monospace; }
   #kbd { position: fixed; left: -1000px; top: 0; opacity: 0; width: 10px; height: 10px; }
 </style>
@@ -38,6 +42,13 @@
   <button data-act="fullscreen">Pantalla completa</button>
   <button data-act="keyboard">Teclado</button>
   <button data-act="mode">Cambiar transporte</button>
+  <div class="menu-label">Resolución</div>
+  <div id="scales" class="seg">
+    <button data-scale="1">Nativa</button>
+    <button data-scale="0.75">75 %</button>
+    <button data-scale="0.5">50 %</button>
+    <button data-scale="custom">Otra…</button>
+  </div>
   <button data-act="reconnect">Reconectar</button>
   <div id="stats">–</div>
 </div>
@@ -83,12 +94,18 @@ function connect() {
 }
 
 // ── Transporte 1: WebSocket + WebCodecs ──────────────────────────────────
-function avcCodecFromAnnexB(buf) {
-  // Busca el SPS (nal_unit_type 7) y construye "avc1.PPCCLL".
+function spsFromAnnexB(buf) {
+  // Busca el SPS (nal_unit_type 7): da el códec "avc1.PPCCLL" y sus bytes,
+  // que cambian cuando cambia la resolución del monitor virtual.
+  const hex = (b) => b.toString(16).padStart(2, "0");
   for (let i = 0; i + 4 < buf.length; i++) {
     if (buf[i] === 0 && buf[i + 1] === 0 && buf[i + 2] === 1 && (buf[i + 3] & 0x1f) === 7) {
-      const hex = (b) => b.toString(16).padStart(2, "0");
-      return "avc1." + hex(buf[i + 4]) + hex(buf[i + 5]) + hex(buf[i + 6]);
+      let end = i + 4;
+      while (end + 2 < buf.length && !(buf[end] === 0 && buf[end + 1] === 0 && buf[end + 2] <= 1)) end++;
+      return {
+        codec: "avc1." + hex(buf[i + 4]) + hex(buf[i + 5]) + hex(buf[i + 6]),
+        id: Array.from(buf.subarray(i + 3, end), hex).join(""),
+      };
     }
   }
   return null;
@@ -129,11 +146,11 @@ function startWebSocket() {
     ws.send(JSON.stringify({ ack: pts }));
 
     if (key) {
-      const codec = avcCodecFromAnnexB(payload);
-      if (codec && codec !== configured) {
+      const sps = spsFromAnnexB(payload);
+      if (sps && sps.id !== configured) {
         if (!decoder || decoder.state === "closed") decoder = newDecoder();
-        decoder.configure({ codec, optimizeForLatency: true, hardwareAcceleration: "no-preference" });
-        configured = codec;
+        decoder.configure({ codec: sps.codec, optimizeForLatency: true, hardwareAcceleration: "no-preference" });
+        configured = sps.id;
       }
       waitKey = false;
     }
@@ -204,9 +221,45 @@ function startWebRTC() {
 
 // ── Entrada: ratón, táctil y teclado ─────────────────────────────────────
 let inputWs = null;
+// ── Resolución del monitor virtual ───────────────────────────────────────
+// El monitor se crea del tamaño de esta pantalla (píxeles físicos, en su
+// orientación actual) × la escala elegida. Menos escala = menos píxeles que
+// dibujar, codificar y transmitir; la imagen se estira a pantalla completa.
+const store = { get(k, d) { try { return localStorage.getItem(k) ?? d; } catch (_) { return d; } },
+                set(k, v) { try { localStorage.setItem(k, v); } catch (_) {} } };
+let scale = store.get("scale", "1");   // "1" | "0.75" | "0.5" | "1600x900"
+
+function wantedSize() {
+  const m = /^(\d+)x(\d+)$/.exec(scale);
+  if (m) return { w: +m[1], h: +m[2] };
+  const dpr = window.devicePixelRatio || 1, k = parseFloat(scale) || 1;
+  return { w: Math.round(window.innerWidth * dpr * k), h: Math.round(window.innerHeight * dpr * k) };
+}
+function sendSize() {
+  const { w, h } = wantedSize();
+  if (w > 0 && h > 0) send({ t: "resize", w, h });
+}
+let resizeTimer = null;
+window.addEventListener("resize", () => {
+  // Con el teclado virtual abierto la ventana encoge: no es un cambio de pantalla.
+  if (document.activeElement && document.activeElement.id === "kbd") return;
+  clearTimeout(resizeTimer); resizeTimer = setTimeout(sendSize, 400);
+});
+
+function setScale(v) {
+  scale = v; store.set("scale", v); sendSize(); markScale();
+}
+function markScale() {
+  const custom = /x/.test(scale);
+  document.querySelectorAll("#scales button").forEach((b) =>
+    b.classList.toggle("on", b.dataset.scale === scale || (custom && b.dataset.scale === "custom")));
+}
+markScale();
+
 function connectInput() {
   if (inputWs && inputWs.readyState <= 1) return;
   inputWs = new WebSocket(wsBase + "/ws/input");
+  inputWs.onopen = sendSize;
   inputWs.onclose = () => setTimeout(connectInput, 1500);
 }
 const send = (ev) => { if (inputWs && inputWs.readyState === 1) inputWs.send(JSON.stringify(ev)); };
@@ -294,6 +347,15 @@ kbd.addEventListener("input", (e) => {
 // ── Menú ─────────────────────────────────────────────────────────────────
 $("menu-btn").onclick = () => $("menu").classList.toggle("open");
 $("menu").onclick = (e) => {
+  const sc = e.target.dataset && e.target.dataset.scale;
+  if (sc === "custom") {
+    const cur = wantedSize();
+    const v = prompt("Resolución del monitor (ancho x alto):", `${cur.w}x${cur.h}`);
+    const m = v && /^\s*(\d+)\s*[x×*]\s*(\d+)\s*$/.exec(v);
+    if (m) setScale(`${m[1]}x${m[2]}`);
+    return;
+  }
+  if (sc) { setScale(sc); return; }
   const act = e.target.dataset && e.target.dataset.act; if (!act) return;
   $("menu").classList.remove("open");
   if (act === "fullscreen") {
@@ -306,7 +368,8 @@ $("menu").onclick = (e) => {
 
 setInterval(() => {
   const now = performance.now(), dt = (now - stats.last) / 1000;
-  $("stats").textContent = `${mode} · ${(stats.frames / dt).toFixed(0)} fps · ${(stats.bytes * 8 / dt / 1e6).toFixed(1)} Mbit/s`;
+  const vw = mode === "ws" ? canvas.width : video.videoWidth, vh = mode === "ws" ? canvas.height : video.videoHeight;
+  $("stats").textContent = `${mode} · ${vw}×${vh} · ${(stats.frames / dt).toFixed(0)} fps · ${(stats.bytes * 8 / dt / 1e6).toFixed(1)} Mbit/s`;
   if (mode === "ws") { stats.frames = 0; stats.bytes = 0; }
   stats.last = now;
 }, 1000);

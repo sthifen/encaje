@@ -21,12 +21,13 @@ use tokio::sync::{broadcast, mpsc};
 #[derive(Parser)]
 #[command(version, about = "Monitor virtual estilo Spacedesk para Linux (GNOME/Wayland)")]
 struct Args {
-    /// Ancho del monitor virtual (par)
-    #[arg(long, default_value_t = 1920)]
-    width: u32,
-    /// Alto del monitor virtual (par)
-    #[arg(long, default_value_t = 1080)]
-    height: u32,
+    /// Ancho fijo del monitor virtual. Sin --width/--height la resolución
+    /// se adapta a la pantalla de cada visor (y a su escala de rendimiento).
+    #[arg(long, requires = "height")]
+    width: Option<u32>,
+    /// Alto fijo del monitor virtual
+    #[arg(long, requires = "width")]
+    height: Option<u32>,
     /// Fotogramas por segundo
     #[arg(long, default_value_t = 60)]
     fps: u32,
@@ -54,7 +55,8 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|_| "error,linux_spacedesk_clone=info".into());
     tracing_subscriber::fmt().with_target(false).with_env_filter(filter).init();
     let args = Args::parse();
-    let (width, height) = (args.width & !1, args.height & !1);
+    let fixed = args.width.zip(args.height).map(|(w, h)| (w & !1, h & !1));
+    let (width, height) = fixed.unwrap_or((1920, 1080));
 
     // Reservar el puerto antes de crear el monitor virtual.
     let addr = SocketAddr::new(args.bind, args.port);
@@ -69,7 +71,7 @@ async fn main() -> Result<()> {
 
     // Captura → codificador (hilos nativos) → broadcast a clientes (tokio).
     let slot = Arc::new(capture::FrameSlot::default());
-    capture::spawn(display.node_id, width, height, args.fps, slot.clone());
+    let capture = capture::spawn(display.node_id, width, height, args.fps, slot.clone());
     let (frames_tx, _) = broadcast::channel(8);
     let keyreq = encoder::KeyframeRequest::default();
     let rate = encoder::BitrateControl::new(args.bitrate);
@@ -88,9 +90,10 @@ async fn main() -> Result<()> {
     // Entrada remota: se procesa en orden en una sola tarea.
     let (input_tx, mut input_rx) = mpsc::unbounded_channel();
     let d = display.clone();
+    let geometry = capture.geometry.clone();
     tokio::spawn(async move {
         while let Some(ev) = input_rx.recv().await {
-            if let Err(e) = d.inject(ev).await {
+            if let Err(e) = d.inject(ev, geometry.get()).await {
                 tracing::debug!("inyección de entrada falló: {e}");
             }
         }
@@ -105,8 +108,8 @@ async fn main() -> Result<()> {
         keyreq,
         rate,
         input: input_tx,
-        width,
-        height,
+        capture,
+        auto_size: fixed.is_none(),
         fps: args.fps,
     };
     tracing::info!("visor en http://{addr} (WiFi: usa la IP de este equipo)");

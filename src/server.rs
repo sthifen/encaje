@@ -22,6 +22,7 @@ use serde_json::json;
 use tokio::sync::{broadcast, mpsc};
 use webrtc::peer_connection::RTCSessionDescription;
 
+use crate::capture::Capture;
 use crate::display::InputEvent;
 use crate::encoder::{BitrateControl, ClientRate, EncodedFrame, KeyframeRequest};
 
@@ -33,8 +34,9 @@ pub struct AppState {
     pub keyreq: KeyframeRequest,
     pub rate: Arc<BitrateControl>,
     pub input: mpsc::UnboundedSender<InputEvent>,
-    pub width: u32,
-    pub height: u32,
+    pub capture: Capture,
+    /// La resolución sigue a los visores (si no se fijó con --width/--height).
+    pub auto_size: bool,
     pub fps: u32,
 }
 
@@ -62,7 +64,7 @@ async fn info(State(s): State<Arc<AppState>>) -> impl IntoResponse {
     // CORS abierto: el lanzador de la app Android consulta desde file://.
     (
         [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")],
-        Json(json!({ "width": s.width, "height": s.height, "fps": s.fps })),
+        Json(json!({ "width": s.capture.geometry.get().0, "height": s.capture.geometry.get().1, "fps": s.fps, "auto_size": s.auto_size })),
     )
 }
 
@@ -101,7 +103,8 @@ async fn ws_video(
 /// si hay demasiado en vuelo se saltan frames y se baja el bitrate, en lugar
 /// de acumular segundos de retraso en búferes de TCP/adb.
 async fn stream_video(mut socket: WebSocket, s: Arc<AppState>) {
-    let hello = json!({ "type": "config", "width": s.width, "height": s.height, "fps": s.fps });
+    let (width, height) = s.capture.geometry.get();
+    let hello = json!({ "type": "config", "width": width, "height": height, "fps": s.fps });
     if socket.send(Message::Text(hello.to_string().into())).await.is_err() {
         return;
     }
@@ -305,6 +308,10 @@ async fn ws_input(ws: WebSocketUpgrade, State(s): State<Arc<AppState>>) -> Respo
     ws.on_upgrade(move |mut socket| async move {
         while let Some(Ok(msg)) = socket.recv().await {
             if let Message::Text(t) = msg {
+                if let Ok(Resize { w, h }) = serde_json::from_str::<Resize>(&t) {
+                    request_size(&s, w, h);
+                    continue;
+                }
                 match serde_json::from_str::<InputEvent>(&t) {
                     Ok(ev) => {
                         let _ = s.input.send(ev);
@@ -315,3 +322,31 @@ async fn ws_input(ws: WebSocketUpgrade, State(s): State<Arc<AppState>>) -> Respo
         }
     })
 }
+
+/// `{"t":"resize","w":…,"h":…}`: el visor pide un monitor de ese tamaño (su
+/// pantalla en píxeles físicos × la escala de rendimiento elegida).
+#[derive(serde::Deserialize)]
+#[serde(tag = "t", rename = "resize")]
+struct Resize {
+    w: u32,
+    h: u32,
+}
+
+/// Límites de NVENC H.264 y un mínimo usable.
+const MAX_SIDE: u32 = 4096;
+const MIN_SIDE: u32 = 320;
+
+fn request_size(s: &AppState, w: u32, h: u32) {
+    if !s.auto_size {
+        tracing::debug!("resolución fija: se ignora la petición {w}x{h}");
+        return;
+    }
+    // Escalar (manteniendo la proporción) si excede el máximo; tamaños pares.
+    let k = (MAX_SIDE as f64 / w.max(h) as f64).min(1.0);
+    let even = |v: f64| ((v as u32).clamp(MIN_SIDE, MAX_SIDE)) & !1;
+    let (w, h) = (even(w as f64 * k), even(h as f64 * k));
+    if s.capture.geometry.get() != (w, h) {
+        s.capture.resize(w, h);
+    }
+}
+
