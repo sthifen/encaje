@@ -28,7 +28,7 @@ use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, watch};
 
-use crate::adb::{adb, list_devices};
+use crate::adb::{adb, close_app, list_devices};
 use crate::grab_window::{self, GrabEvent};
 use crate::{capture, display, events, monitors};
 
@@ -507,6 +507,9 @@ async fn start_server(serial: &str) -> Result<(Child, u16)> {
     let pushed = adb(&["-s", serial, "push", &local.to_string_lossy(), REMOTE_JAR]).await;
     let _ = std::fs::remove_file(&local);
     pushed.context("adb push del servidor falló")?;
+
+    // La app del visor (modo segundo monitor) no hace falta aquí.
+    close_app(serial).await;
 
     // Un servidor de una ejecución anterior tendría ocupado el socket.
     let _ = adb(&["-s", serial, "shell", &format!("pkill -f {SERVER_CLASS}")]).await;
