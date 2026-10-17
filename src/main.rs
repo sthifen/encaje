@@ -88,7 +88,21 @@ fn main() -> Result<()> {
     if let Some(spec) = &args.overlay {
         return overlay::run(spec);
     }
-    tokio::runtime::Runtime::new()?.block_on(serve(args))
+    let rt = tokio::runtime::Runtime::new()?;
+    let result = rt.block_on(serve(args));
+    rt.shutdown_timeout(std::time::Duration::from_secs(1));
+    // Salir sin los destructores de las bibliotecas: el de NVENC (libnvcuvid)
+    // se bloquea si el codificador sigue en marcha y el proceso no terminaría
+    // nunca (la interfaz no podría cambiar de modo).
+    let code = match &result {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("Error: {e:?}");
+            1
+        }
+    };
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+    unsafe { libc::_exit(code) }
 }
 
 async fn serve(args: Args) -> Result<()> {

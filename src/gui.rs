@@ -262,9 +262,12 @@ fn build(app: &gtk::Application) {
         {
             let state = state.clone();
             button.connect_clicked(move |_| {
+                // Tocar el modo que ya está activo no lo apaga: sin texto, eso
+                // parecía un fallo. Se apaga cerrando la ventana.
                 let mut s = state.borrow_mut();
-                let new = if s.wanted == Some(mode) { None } else { Some(mode) };
-                set_wanted(&mut s, new);
+                if s.wanted != Some(mode) {
+                    set_wanted(&mut s, Some(mode));
+                }
             });
         }
         cards.append(&button);
