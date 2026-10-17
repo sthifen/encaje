@@ -9,6 +9,7 @@
 use std::io::Write;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use tokio::sync::watch;
 
@@ -31,7 +32,9 @@ pub fn emit(kind: &str) {
 }
 
 /// Anuncia la conexión cuando se sepa dónde está el monitor virtual (puede
-/// tardar un momento si se acaba de crear).
+/// tardar un momento si se acaba de crear) y haya dejado de moverse: al
+/// conectar el visor el monitor cambia de tamaño y Mutter recoloca las
+/// pantallas, y la animación saldría donde estaba el borde antes.
 pub fn connected() {
     if !ENABLED.load(Ordering::Relaxed) {
         return;
@@ -42,11 +45,12 @@ pub fn connected() {
     };
     tokio::spawn(async move {
         let mut rx = rx;
-        let monitor = tokio::time::timeout(std::time::Duration::from_secs(5), rx.wait_for(Option::is_some))
-            .await
-            .ok()
-            .and_then(Result::ok)
-            .and_then(|m| m.clone());
+        let _ = tokio::time::timeout(Duration::from_secs(5), rx.wait_for(Option::is_some)).await;
+        let settle = async {
+            while let Ok(Ok(())) = tokio::time::timeout(Duration::from_millis(700), rx.changed()).await {}
+        };
+        let _ = tokio::time::timeout(Duration::from_secs(4), settle).await;
+        let monitor = rx.borrow().clone();
         send(serde_json::json!({ "t": "connected", "monitor": monitor }));
     });
 }
