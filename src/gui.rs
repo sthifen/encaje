@@ -14,6 +14,7 @@
 
 use std::cell::RefCell;
 use std::io::BufRead;
+use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::rc::Rc;
@@ -139,6 +140,9 @@ button.light:hover { filter: brightness(1.15); }
 
 pub fn run() -> Result<()> {
     let app = gtk::Application::builder().application_id("dev.spacedesk.linux").build();
+    // Sólo en la instancia principal: otra ejecución de la interfaz se limita
+    // a activar ésta.
+    app.connect_startup(|_| stop_strays());
     app.connect_activate(build);
     // Sin argumentos: los nuestros ya los leyó clap.
     app.run_with_args::<&str>(&[]);
@@ -324,6 +328,45 @@ fn build(app: &gtk::Application) {
 }
 
 // ---- Proceso vigilado ----
+
+/// Cierra los servidores que sigan abiertos de antes (lanzados a mano o de
+/// una interfaz que se cerró mal): cada uno crea su monitor virtual.
+fn stop_strays() {
+    let Some(name) = std::env::current_exe().ok().and_then(|p| p.file_name().map(|n| n.to_owned())) else { return };
+    let me = std::process::id();
+    let strays: Vec<i32> = std::fs::read_dir("/proc")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| e.file_name().to_str()?.parse::<u32>().ok())
+        .filter(|&pid| pid != me)
+        .filter(|pid| {
+            let Ok(cmdline) = std::fs::read(format!("/proc/{pid}/cmdline")) else { return false };
+            let mut args = cmdline.split(|&b| b == 0).filter(|a| !a.is_empty());
+            let is_ours = args
+                .next()
+                .and_then(|a0| std::path::Path::new(std::ffi::OsStr::from_bytes(a0)).file_name().map(|n| n == name))
+                .unwrap_or(false);
+            is_ours && !args.any(|a| a == b"--gui" || a == b"--overlay")
+        })
+        .map(|pid| pid as i32)
+        .collect();
+    if strays.is_empty() {
+        return;
+    }
+    tracing::info!("cerrando {} servidor(es) que seguían abiertos", strays.len());
+    for &pid in &strays {
+        unsafe { libc::kill(pid, libc::SIGINT) };
+    }
+    let alive = |pid: &i32| std::path::Path::new(&format!("/proc/{pid}")).exists();
+    let deadline = Instant::now() + Duration::from_secs(6);
+    while strays.iter().any(alive) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    for pid in strays.iter().filter(|p| alive(p)) {
+        unsafe { libc::kill(*pid, libc::SIGKILL) };
+    }
+}
 
 fn set_wanted(s: &mut State, mode: Option<Mode>) {
     s.wanted = mode;

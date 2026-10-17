@@ -114,7 +114,8 @@ async fn serve(args: Args) -> Result<()> {
 
     let before = monitors::snapshot().await?;
     let display = Arc::new(display::VirtualDisplay::create(&env, width, height).await?);
-    events::set_monitor(monitors::keep(before));
+    let keeper = monitors::keep(before);
+    events::set_monitor(keeper.placed.clone());
 
     // Captura → codificador (hilos nativos) → broadcast a clientes (tokio).
     let slot = Arc::new(capture::FrameSlot::default());
@@ -161,11 +162,18 @@ async fn serve(args: Args) -> Result<()> {
     };
     tracing::info!("visor en http://{addr} (WiFi: usa la IP de este equipo)");
 
-    tokio::select! {
-        r = server::serve(state, listener) => r?,
-        _ = tokio::signal::ctrl_c() => tracing::info!("cerrando…"),
-        _ = display.closed() => anyhow::bail!("GNOME cerró la sesión (se pulsó «Dejar de compartir»)"),
-    }
+    let closed = tokio::select! {
+        r = server::serve(state, listener) => r.map(|_| false),
+        _ = tokio::signal::ctrl_c() => {
+            tracing::info!("cerrando…");
+            Ok(false)
+        }
+        _ = display.closed() => Ok(true),
+    };
     display.stop().await;
+    keeper.restore().await;
+    if closed? {
+        anyhow::bail!("GNOME cerró la sesión (se pulsó «Dejar de compartir»)");
+    }
     Ok(())
 }

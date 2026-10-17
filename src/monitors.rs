@@ -11,9 +11,12 @@
 //! * Si lo mueves en Configuración → Pantallas, la posición se guarda en
 //!   `~/.config/spacedesk-linux/layout.json`, una por cada combinación de
 //!   monitores físicos (no es lo mismo el portátil solo que con el HDMI).
+//! * Al quitar el monitor virtual Mutter vuelve a su disposición por defecto,
+//!   así que se repone la que tenías (`Keeper::restore`).
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -282,13 +285,31 @@ fn desired(before: &State, now: &State, virt: &Placed, offset: Option<Offset>) -
     };
     let (x, y) = snap(&rects, virt.rect.w, virt.rect.h, want);
     out.push(Placed { rect: Rect { x, y, ..virt.rect }, scale: 1.0, transform: 0, primary: false, ..virt.clone() });
-    // Mutter exige que la disposición empiece en (0, 0).
+    normalize(&mut out);
+    out
+}
+
+/// Mutter exige que la disposición empiece en (0, 0).
+fn normalize(out: &mut [Placed]) {
     let min_x = out.iter().map(|p| p.rect.x).min().unwrap_or(0);
     let min_y = out.iter().map(|p| p.rect.y).min().unwrap_or(0);
-    for p in &mut out {
+    for p in out {
         p.rect.x -= min_x;
         p.rect.y -= min_y;
     }
+}
+
+/// La disposición de referencia sin el monitor virtual, con lo que sigue
+/// conectado.
+fn without_virtual(baseline: &State, now: &State) -> Vec<Placed> {
+    let mut out: Vec<Placed> = baseline
+        .placed
+        .iter()
+        .filter(|p| now.modes.contains_key(&p.connector))
+        .filter(|p| p.vendor != VIRTUAL_VENDOR || now.find(&p.connector).is_some())
+        .cloned()
+        .collect();
+    normalize(&mut out);
     out
 }
 
@@ -311,19 +332,74 @@ async fn apply(p: &DisplayConfigProxy<'_>, now: &State, layout: &[Placed]) -> Re
         .context("Mutter rechazó la disposición de monitores")
 }
 
+/// Lo que `keep` comparte con `restore`.
+struct Shared {
+    /// Disposición de referencia (sin el monitor virtual).
+    baseline: State,
+    virt: Option<String>,
+}
+
+/// Vigila el monitor virtual mientras existe.
+pub struct Keeper {
+    /// El monitor y su vecino.
+    pub placed: watch::Receiver<Option<VirtualMonitor>>,
+    shared: Arc<Mutex<Shared>>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Keeper {
+    /// Llamar tras quitar el monitor virtual: Mutter aplica entonces su
+    /// disposición por defecto (enciende lo apagado y lo recoloca todo), y se
+    /// vuelve a poner la que tenías.
+    pub async fn restore(self) {
+        self.task.abort();
+        let Shared { baseline, virt } = std::mem::replace(
+            &mut *self.shared.lock().unwrap(),
+            Shared { baseline: State { serial: 0, placed: Vec::new(), modes: HashMap::new() }, virt: None },
+        );
+        if let Err(e) = restore_inner(&baseline, virt.as_deref()).await {
+            tracing::warn!("no se pudo reponer la disposición de monitores: {e:#}");
+        }
+    }
+}
+
+async fn restore_inner(baseline: &State, virt: Option<&str>) -> Result<()> {
+    let p = proxy().await?;
+    // Esperar a que Mutter quite el monitor y rehaga la disposición.
+    let mut now = read(&p).await?;
+    for _ in 0..30 {
+        if virt.is_none_or(|v| now.find(v).is_none()) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        now = read(&p).await?;
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let now = read(&p).await?;
+    let layout = without_virtual(baseline, &now);
+    if layout.is_empty() || same_layout(&layout, &now.placed) {
+        return Ok(());
+    }
+    apply(&p, &now, &layout).await?;
+    tracing::info!("disposición de monitores repuesta");
+    Ok(())
+}
+
 /// Espera a que aparezca el monitor virtual nuevo, lo coloca y vigila los
-/// cambios. Publica en el `watch` el monitor y su vecino.
-pub fn keep(before: State) -> watch::Receiver<Option<VirtualMonitor>> {
+/// cambios.
+pub fn keep(before: State) -> Keeper {
     let (tx, rx) = watch::channel(None);
-    tokio::spawn(async move {
-        if let Err(e) = keep_inner(before, tx).await {
+    let shared = Arc::new(Mutex::new(Shared { baseline: before.clone(), virt: None }));
+    let s = shared.clone();
+    let task = tokio::spawn(async move {
+        if let Err(e) = keep_inner(before, tx, s).await {
             tracing::warn!("disposición de monitores: {e:#}");
         }
     });
-    rx
+    Keeper { placed: rx, shared, task }
 }
 
-async fn keep_inner(mut before: State, tx: watch::Sender<Option<VirtualMonitor>>) -> Result<()> {
+async fn keep_inner(mut before: State, tx: watch::Sender<Option<VirtualMonitor>>, shared: Arc<Mutex<Shared>>) -> Result<()> {
     let p = proxy().await?;
     let mut changes = p.receive_monitors_changed().await?;
 
@@ -338,6 +414,7 @@ async fn keep_inner(mut before: State, tx: watch::Sender<Option<VirtualMonitor>>
 
     // 2. Colocarlo, y volver a hacerlo cada vez que cambia de tamaño (Mutter
     //    rehace la disposición). Cualquier otro cambio lo hiciste tú: se guarda.
+    shared.lock().unwrap().virt = Some(virt.clone());
     let mut applied: Option<Vec<Placed>> = None;
     let mut size = None;
     loop {
@@ -378,6 +455,7 @@ async fn keep_inner(mut before: State, tx: watch::Sender<Option<VirtualMonitor>>
                 // Lo cambiaste en Configuración: la nueva disposición pasa a
                 // ser la de referencia (incluido lo que enciendas o apagues).
                 before = State { placed: now.placed.iter().filter(|m| m.connector != virt).cloned().collect(), ..now.clone() };
+                shared.lock().unwrap().baseline = before.clone();
                 applied = Some(now.placed.clone());
             }
             if let Some(pr) = now.placed.iter().find(|m| m.primary && m.vendor != VIRTUAL_VENDOR) {
@@ -431,6 +509,22 @@ mod tests {
         assert_eq!(get("Meta-0"), Some(Rect { x: 0, y: 1080, w: 1370, h: 858 }));
         assert_eq!(get("HDMI-1"), Some(Rect { x: 1370, y: 0, w: 1920, h: 1080 }));
         assert_eq!(get("eDP-1"), Some(Rect { x: 1370, y: 1080, w: 1920, h: 1080 }));
+    }
+
+    #[test]
+    fn restore_drops_virtual_and_keeps_disabled_off() {
+        // Tablet a la izquierda del portátil; al quitarla Mutter encendió DP-3.
+        let baseline = state(vec![placed("HDMI-1", 1370, 0, 1920, 1080, true), placed("eDP-1", 1370, 1080, 1920, 1080, false)]);
+        let now = state(vec![
+            placed("HDMI-1", 0, 0, 1920, 1080, true),
+            placed("eDP-1", 1920, 0, 1920, 1080, false),
+            placed("DP-3", 3840, 0, 640, 480, false),
+        ]);
+        let layout = without_virtual(&baseline, &now);
+        let get = |c: &str| layout.iter().find(|p| p.connector == c).map(|p| p.rect);
+        assert_eq!(get("DP-3"), None);
+        assert_eq!(get("HDMI-1"), Some(Rect { x: 0, y: 0, w: 1920, h: 1080 }));
+        assert_eq!(get("eDP-1"), Some(Rect { x: 0, y: 1080, w: 1920, h: 1080 }));
     }
 
     #[test]

@@ -18,7 +18,7 @@
 
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -60,6 +60,23 @@ impl TabletInfo {
     }
 }
 
+/// Se pidió cerrar (Ctrl+C o SIGINT de la interfaz). Un `ctrl_c()` nuevo en
+/// cada vuelta perdería la señal si llega mientras se hace otra cosa.
+async fn quit_requested() {
+    static QUIT: OnceLock<watch::Receiver<bool>> = OnceLock::new();
+    let mut rx = QUIT
+        .get_or_init(|| {
+            let (tx, rx) = watch::channel(false);
+            tokio::spawn(async move {
+                let _ = tokio::signal::ctrl_c().await;
+                let _ = tx.send(true);
+            });
+            rx
+        })
+        .clone();
+    let _ = rx.wait_for(|q| *q).await;
+}
+
 /// Cuánto se mantiene el monitor virtual tras perder la tablet. Con un cable
 /// flojo se reconecta antes y no cambia nada de sitio.
 const GRACE: Duration = Duration::from_secs(15);
@@ -69,7 +86,7 @@ struct Monitor {
     display: display::VirtualDisplay,
     capture: capture::Capture,
     size: (u32, u32),
-    placed: watch::Receiver<Option<monitors::VirtualMonitor>>,
+    keeper: monitors::Keeper,
 }
 
 impl Monitor {
@@ -80,13 +97,13 @@ impl Monitor {
         // el framerate variable de Mutter, y la ventana negra encima, casi no
         // llegan frames.
         let capture = capture::spawn(display.node_id, size.0, size.1, 5, Arc::new(capture::FrameSlot::default()), false);
-        let placed = monitors::keep(before);
-        events::set_monitor(placed.clone());
-        Ok(Self { display, capture, size, placed })
+        let keeper = monitors::keep(before);
+        events::set_monitor(keeper.placed.clone());
+        Ok(Self { display, capture, size, keeper })
     }
 
     fn connector(&self) -> Option<String> {
-        self.placed.borrow().as_ref().map(|m| m.connector.clone())
+        self.keeper.placed.borrow().as_ref().map(|m| m.connector.clone())
     }
 }
 
@@ -103,6 +120,8 @@ pub async fn run(env: &display::Environment, fixed: Option<(u32, u32)>) -> Resul
         bail!("adb no encontrado: instala android-tools");
     }
     let (events_tx, mut events) = mpsc::unbounded_channel();
+    // Registrar ya el manejador de la señal.
+    let _ = tokio::time::timeout(Duration::ZERO, quit_requested()).await;
     let grab = grab_window::spawn(events_tx)?;
     let mut monitor: Option<Monitor> = None;
     let mut lost_at: Option<Instant> = None;
@@ -124,6 +143,7 @@ pub async fn run(env: &display::Environment, fixed: Option<(u32, u32)>) -> Resul
                     tracing::info!("la tablet no volvió: se quita el monitor virtual");
                     grab.detach();
                     m.display.stop().await;
+                    m.keeper.restore().await;
                     events::emit("waiting");
                 }
                 lost_at = None;
@@ -136,7 +156,7 @@ pub async fn run(env: &display::Environment, fixed: Option<(u32, u32)>) -> Resul
             };
             tokio::select! {
                 _ = tokio::time::sleep(Duration::from_secs(1)) => {}
-                _ = tokio::signal::ctrl_c() => break 'outer End::Quit,
+                _ = quit_requested() => break 'outer End::Quit,
                 _ = closed => break 'outer End::Closed,
             }
         };
@@ -173,6 +193,7 @@ pub async fn run(env: &display::Environment, fixed: Option<(u32, u32)>) -> Resul
     grab.detach();
     if let Some(m) = monitor {
         m.display.stop().await;
+        m.keeper.restore().await;
     }
     match end {
         End::Closed => bail!("GNOME cerró la sesión (se pulsó «Dejar de compartir»)"),
@@ -221,7 +242,7 @@ async fn session(
         }
     }
     let m = monitor.as_mut().unwrap();
-    let mut placed = m.placed.clone();
+    let mut placed = m.keeper.placed.clone();
     placed.mark_changed();
 
     // Eventos de la ventana que quedaran de antes de reconectar.
@@ -255,7 +276,7 @@ async fn session(
                 }
             }
             _ = m.display.closed() => break End::Closed,
-            _ = tokio::signal::ctrl_c() => {
+            _ = quit_requested() => {
                 tracing::info!("cerrando…");
                 break End::Quit;
             }
