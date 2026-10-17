@@ -25,5 +25,11 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- Imagen copiada en el PC, para el portapapeles (ClipProvider). -->
+        <provider
+            android:name=".ClipProvider"
+            android:authorities="dev.spacedesk.linux.clip"
+            android:exported="true" />
     </application>
 </manifest>

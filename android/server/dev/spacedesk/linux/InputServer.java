@@ -14,6 +14,9 @@ import java.io.InputStreamReader;
 import java.lang.reflect.Method;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.util.Arrays;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -30,6 +33,8 @@ import java.util.regex.Pattern;
  *   PC → tablet: [u8 dispositivo (0 ratón, 1 teclado)] [u8 longitud] [informe HID]
  *   tablet → PC: [u8 1] [f32 px por unidad de ratón] [u16 ancho] [u16 alto]
  *                al conectar y cada vez que gira la pantalla (big endian).
+ *   en ambos sentidos: [u8 2] [u8 tipo (0 texto UTF-8, 1 imagen)] [u32 longitud]
+ *                [datos], el portapapeles cuando cambia (ver Clipboard).
  *
  * Android 16 ignora los ratones HID absolutos, así que el ratón es relativo.
  * Con la aceleración desactivada el puntero avanza una cantidad fija por
@@ -79,6 +84,14 @@ public final class InputServer {
     private static FileDescriptor mouse;
     private static FileDescriptor keyboard;
 
+    private static final int DEV_CLIPBOARD = 2;
+    private static final int MAX_CLIP = 32 << 20;
+    private static Clipboard clipboard;
+    /** Lo último que pasó por el portapapeles en cualquier sentido: evita el eco. */
+    private static byte[] lastClip;
+    /** Leer y escribir el portapapeles fuera del hilo de la entrada. */
+    private static final ExecutorService clipThread = Executors.newSingleThreadExecutor();
+
     public static void main(String[] args) throws Exception {
         LocalServerSocket server = new LocalServerSocket(SOCKET);
         System.out.println("listo");
@@ -94,11 +107,16 @@ public final class InputServer {
             float scale = calibrate();
             System.out.println("escala del puntero: " + scale);
             watchDisplay(out, scale);
+            watchClipboard(out);
 
             DataInputStream in = new DataInputStream(client.getInputStream());
             byte[] report = new byte[255];
             while (true) {
                 int dev = in.readUnsignedByte();
+                if (dev == DEV_CLIPBOARD) {
+                    readClip(in);
+                    continue;
+                }
                 int len = in.readUnsignedByte();
                 in.readFully(report, 0, len);
                 input(dev == 0 ? mouse : keyboard, report, len);
@@ -249,6 +267,54 @@ public final class InputServer {
             Matcher m = Pattern.compile("(\\d+)x(\\d+)").matcher(sh("wm size"));
             return m.find() ? new int[] {Integer.parseInt(m.group(1)), Integer.parseInt(m.group(2))} : new int[] {1920, 1080};
         }
+    }
+
+    // ---- Portapapeles ----
+
+    private static void watchClipboard(DataOutputStream out) {
+        try {
+            clipboard = new Clipboard();
+            clipboard.listen(() -> clipThread.execute(() -> {
+                try {
+                    Clipboard.Content c = clipboard.read();
+                    if (c == null || c.data.length > MAX_CLIP || Arrays.equals(c.data, lastClip)) return;
+                    lastClip = c.data;
+                    sendClip(out, c);
+                } catch (Exception e) {
+                    System.out.println("portapapeles: " + e);
+                }
+            }));
+            System.out.println("portapapeles compartido");
+        } catch (Exception e) {
+            clipboard = null;
+            System.out.println("sin portapapeles compartido: " + e);
+        }
+    }
+
+    private static void readClip(DataInputStream in) throws IOException {
+        int kind = in.readUnsignedByte();
+        int len = in.readInt();
+        if (len < 0 || len > MAX_CLIP) throw new IOException("portapapeles demasiado grande: " + len);
+        byte[] data = new byte[len];
+        in.readFully(data);
+        if (clipboard == null) return;
+        clipThread.execute(() -> {
+            try {
+                lastClip = data;
+                if (kind == Clipboard.PNG) clipboard.writeImage(data);
+                else clipboard.writeText(new String(data, "UTF-8"));
+            } catch (Exception e) {
+                System.out.println("portapapeles: " + e);
+            }
+        });
+    }
+
+    private static synchronized void sendClip(DataOutputStream out, Clipboard.Content c) throws IOException {
+        out.writeByte(DEV_CLIPBOARD);
+        out.writeByte(c.kind);
+        out.writeInt(c.data.length);
+        out.write(c.data);
+        out.flush();
     }
 
     // ---- UHID ----

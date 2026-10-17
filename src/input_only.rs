@@ -30,6 +30,7 @@ use tokio::sync::{mpsc, watch};
 
 use crate::adb::{adb, close_app, list_devices};
 use crate::grab_window::{self, GrabEvent};
+use crate::clipboard::{self, Clip};
 use crate::{capture, display, events, monitors};
 
 const SERVER_JAR: &[u8] = include_bytes!("../android/input-server.jar");
@@ -39,6 +40,7 @@ const SOCKET: &str = "localabstract:spacedesk-input";
 
 const DEV_MOUSE: u8 = 0;
 const DEV_KEYBOARD: u8 = 1;
+const DEV_CLIPBOARD: u8 = 2;
 
 /// Tamaño y escala del puntero que informa la tablet.
 #[derive(Clone, Copy, Debug)]
@@ -123,6 +125,13 @@ pub async fn run(env: &display::Environment, fixed: Option<(u32, u32)>) -> Resul
     // Registrar ya el manejador de la señal.
     let _ = tokio::time::timeout(Duration::ZERO, quit_requested()).await;
     let grab = grab_window::spawn(events_tx)?;
+    let mut clip = match clipboard::spawn() {
+        Ok(c) => Some(c),
+        Err(e) => {
+            tracing::warn!("sin portapapeles compartido: {e:#}");
+            None
+        }
+    };
     let mut monitor: Option<Monitor> = None;
     let mut lost_at: Option<Instant> = None;
     let mut waiting_logged = false;
@@ -171,7 +180,7 @@ pub async fn run(env: &display::Environment, fixed: Option<(u32, u32)>) -> Resul
                 continue;
             }
         };
-        let result = session(env, fixed, port, &mut monitor, &grab, &mut events).await;
+        let result = session(env, fixed, port, &mut monitor, &grab, &mut events, &mut clip).await;
         let _ = tokio::time::timeout(Duration::from_secs(3), server.wait()).await;
         let _ = adb(&["-s", &serial, "forward", "--remove", &format!("tcp:{port}")]).await;
         match result {
@@ -210,15 +219,18 @@ async fn session(
     monitor: &mut Option<Monitor>,
     grab: &grab_window::GrabWindow,
     events: &mut mpsc::UnboundedReceiver<GrabEvent>,
+    clip: &mut Option<(clipboard::Clipboard, mpsc::UnboundedReceiver<Clip>)>,
 ) -> Result<End> {
     let stream = TcpStream::connect(("127.0.0.1", port))
         .await
         .context("no se pudo conectar con el servidor de la tablet")?;
     stream.set_nodelay(true)?;
     let (rx, tx) = stream.into_split();
-    let mut infos = read_infos(rx);
+    let mut infos = read_tablet(rx);
 
-    let info = infos.recv().await.context("la tablet cerró la conexión al empezar")?;
+    let Some(TabletMsg::Info(info)) = infos.recv().await else {
+        bail!("la tablet cerró la conexión al empezar");
+    };
     tracing::info!(
         "tablet: {}x{}, el puntero avanza {:.3} px por unidad",
         info.width,
@@ -248,6 +260,15 @@ async fn session(
     // Eventos de la ventana que quedaran de antes de reconectar.
     while events.try_recv().is_ok() {}
     events::connected();
+    // Lo copiado en el PC mientras no estaba la tablet: basta con lo de ahora.
+    if let Some((board, changes)) = clip.as_mut() {
+        while changes.try_recv().is_ok() {}
+        board.resend();
+    }
+    let (board, mut changes) = match clip.as_mut() {
+        Some((b, c)) => (Some(&*b), Some(c)),
+        None => (None, None),
+    };
 
     let mut out = Output { tx, pointer: Pointer::new(info), keys: Keys::default() };
     let end = loop {
@@ -258,8 +279,23 @@ async fn session(
                     break End::Lost;
                 }
             }
-            info = infos.recv() => match info {
-                Some(info) => {
+            Some(c) = async {
+                match changes.as_mut() {
+                    Some(c) => c.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                if out.clip(&c).await.is_err() {
+                    break End::Lost;
+                }
+            }
+            msg = infos.recv() => match msg {
+                Some(TabletMsg::Clip(c)) => {
+                    if let Some(b) = board {
+                        b.set(c);
+                    }
+                }
+                Some(TabletMsg::Info(info)) => {
                     tracing::info!("la tablet giró: {}x{}", info.width, info.height);
                     out.pointer.update(info);
                     if fixed.is_none() {
@@ -289,36 +325,68 @@ async fn session(
     Ok(end)
 }
 
+enum TabletMsg {
+    Info(TabletInfo),
+    Clip(Clip),
+}
+
 /// Lee en otra tarea los mensajes de la tablet: `read_exact` no se puede
 /// cancelar a medias dentro de un `select!` sin perder bytes.
-fn read_infos(mut rx: OwnedReadHalf) -> mpsc::Receiver<TabletInfo> {
+fn read_tablet(mut rx: OwnedReadHalf) -> mpsc::Receiver<TabletMsg> {
     let (tx, out) = mpsc::channel(4);
     tokio::spawn(async move {
-        while let Ok(Some(info)) = read_info(&mut rx).await {
-            if tx.send(info).await.is_err() {
-                break;
+        loop {
+            match read_msg(&mut rx).await {
+                Ok(Some(msg)) => {
+                    if tx.send(msg).await.is_err() {
+                        break;
+                    }
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    tracing::warn!("{e:#}");
+                    break;
+                }
             }
         }
     });
     out
 }
 
-/// Mensaje de la tablet: [u8 1] [f32 escala] [u16 ancho] [u16 alto], big endian.
-async fn read_info(rx: &mut (impl AsyncReadExt + Unpin)) -> Result<Option<TabletInfo>> {
-    let mut buf = [0u8; 9];
-    match rx.read_exact(&mut buf).await {
-        Ok(_) => {}
+/// Mensajes de la tablet (big endian):
+///   [u8 1] [f32 escala] [u16 ancho] [u16 alto]
+///   [u8 2] [u8 tipo (0 texto, 1 imagen)] [u32 longitud] [datos]
+async fn read_msg(rx: &mut (impl AsyncReadExt + Unpin)) -> Result<Option<TabletMsg>> {
+    let kind = match rx.read_u8().await {
+        Ok(k) => k,
         Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
         Err(e) => return Err(e.into()),
+    };
+    match kind {
+        1 => {
+            let mut buf = [0u8; 8];
+            rx.read_exact(&mut buf).await?;
+            Ok(Some(TabletMsg::Info(TabletInfo {
+                scale: f32::from_be_bytes(buf[0..4].try_into().unwrap()) as f64,
+                width: u16::from_be_bytes([buf[4], buf[5]]) as u32,
+                height: u16::from_be_bytes([buf[6], buf[7]]) as u32,
+            })))
+        }
+        DEV_CLIPBOARD => {
+            let what = rx.read_u8().await?;
+            let len = rx.read_u32().await? as usize;
+            if len > clipboard::MAX_BYTES {
+                bail!("portapapeles de la tablet demasiado grande ({len} bytes)");
+            }
+            let mut data = vec![0u8; len];
+            rx.read_exact(&mut data).await?;
+            Ok(Some(TabletMsg::Clip(match what {
+                0 => Clip::Text(String::from_utf8_lossy(&data).into_owned()),
+                _ => Clip::Image(data),
+            })))
+        }
+        k => bail!("mensaje desconocido de la tablet: {k}"),
     }
-    if buf[0] != 1 {
-        bail!("mensaje desconocido de la tablet: {}", buf[0]);
-    }
-    Ok(Some(TabletInfo {
-        scale: f32::from_be_bytes(buf[1..5].try_into().unwrap()) as f64,
-        width: u16::from_be_bytes([buf[5], buf[6]]) as u32,
-        height: u16::from_be_bytes([buf[7], buf[8]]) as u32,
-    }))
 }
 
 // ---- Entrada → informes HID ----
@@ -374,6 +442,20 @@ impl Output {
     async fn keyboard(&mut self) -> Result<()> {
         let report = self.keys.report();
         self.send(DEV_KEYBOARD, &report).await
+    }
+
+    /// [u8 2] [u8 tipo (0 texto, 1 imagen)] [u32 longitud] [datos]
+    async fn clip(&mut self, clip: &Clip) -> Result<()> {
+        let (what, data) = match clip {
+            Clip::Text(t) => (0u8, t.as_bytes()),
+            Clip::Image(png) => (1u8, png.as_slice()),
+        };
+        let mut msg = Vec::with_capacity(6 + data.len());
+        msg.extend_from_slice(&[DEV_CLIPBOARD, what]);
+        msg.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        msg.extend_from_slice(data);
+        self.tx.write_all(&msg).await?;
+        Ok(())
     }
 
     async fn send(&mut self, dev: u8, report: &[u8]) -> Result<()> {

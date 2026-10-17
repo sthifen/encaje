@@ -9,6 +9,7 @@
 
 mod adb;
 mod capture;
+mod clipboard;
 mod display;
 mod encoder;
 mod events;

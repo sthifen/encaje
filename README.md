@@ -103,6 +103,14 @@ Android 16 ignora los ratones HID absolutos, así que el ratón es relativo:
 mientras dura la sesión se desactiva la aceleración del puntero (y se
 restaura al salir), y el PC lleva la cuenta de dónde está el puntero.
 
+**Portapapeles compartido.** Lo que copies en el PC (texto o imágenes) se
+puede pegar en la tablet, y al revés. En el PC se usa el portapapeles de
+X11, que Mutter mantiene sincronizado con el de Wayland; en la tablet, el
+servidor usa el portapapeles de Android con los permisos de *shell*. Para
+pegar en la tablet una **imagen** copiada en el PC hace falta la app
+instalada: Android sólo guarda imágenes como URI `content://`, y es la app
+(`ClipProvider`) la que la sirve. El texto funciona sin ella.
+
 - El monitor virtual mide lo mismo que la tablet en "unidades de ratón",
   así que el puntero va a la misma velocidad que un ratón conectado a ella.
   Al girar la tablet, el monitor cambia de forma.
@@ -169,7 +177,8 @@ OpenH264 sólo es razonable hasta ~1280×720.
 | `src/adb.rs` | Modo USB (`adb reverse` automático). |
 | `src/input_only.rs` | Modo `--input-only`: servidor en la tablet y posición del puntero. |
 | `src/grab_window.rs` | Ventana invisible sobre el monitor virtual que recoge ratón y teclado. |
-| `android/server/` | Servidor UHID para la tablet; `android/build-apk.sh` genera `input-server.jar`. |
+| `src/clipboard.rs` | Portapapeles del PC (X11 + XFixes) para el modo `--input-only`. |
+| `android/server/` | Servidor UHID y de portapapeles para la tablet; `android/build-apk.sh` genera `input-server.jar`. |
 | `web/index.html` | Visor (incrustado en el binario). |
 | `android/` | App: WebView a pantalla completa y lanzador USB/WiFi. Se compila sin Gradle. |
 
