@@ -34,9 +34,9 @@ use crate::clipboard::{self, Clip};
 use crate::{capture, display, events, monitors};
 
 const SERVER_JAR: &[u8] = include_bytes!("../android/input-server.jar");
-const REMOTE_JAR: &str = "/data/local/tmp/spacedesk-input.jar";
-const SERVER_CLASS: &str = "dev.spacedesk.linux.InputServer";
-const SOCKET: &str = "localabstract:spacedesk-input";
+const REMOTE_JAR: &str = "/data/local/tmp/encaje-input.jar";
+const SERVER_CLASS: &str = "dev.encaje.InputServer";
+const SOCKET: &str = "localabstract:encaje-input";
 
 const DEV_MOUSE: u8 = 0;
 const DEV_KEYBOARD: u8 = 1;
@@ -584,7 +584,7 @@ async fn pick_device() -> Option<String> {
 /// Sube el servidor, lo arranca y abre un `adb forward` hacia su socket.
 /// El proceso de adb se mata al soltar el `Child`.
 async fn start_server(serial: &str) -> Result<(Child, u16)> {
-    let local: PathBuf = std::env::temp_dir().join(format!("spacedesk-input-{}.jar", std::process::id()));
+    let local: PathBuf = std::env::temp_dir().join(format!("encaje-input-{}.jar", std::process::id()));
     std::fs::write(&local, SERVER_JAR)?;
     let pushed = adb(&["-s", serial, "push", &local.to_string_lossy(), REMOTE_JAR]).await;
     let _ = std::fs::remove_file(&local);

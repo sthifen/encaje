@@ -1,4 +1,4 @@
-# Spacedesk Linux
+# Encaje
 
 Monitor virtual para **GNOME / Wayland** que se transmite a un móvil Android
 (app nativa) o a cualquier navegador, por **cable USB** o por **WiFi**, con
@@ -16,16 +16,18 @@ Visor ──(táctil, ratón, teclado)──► WebSocket ──► Mutter Remot
 
 Descarga de la [última release](../../releases/latest):
 
-- **`Spacedesk_Linux-*-x86_64.AppImage`**: un solo archivo.
-  `chmod +x Spacedesk_Linux-*.AppImage` y ábrelo con doble clic.
-- **`spacedesk-linux-*-x86_64.tar.gz`**: binario + acceso directo del menú.
+- **`Encaje-*-x86_64.AppImage`**: un solo archivo.
+  `chmod +x Encaje-*.AppImage` y ábrelo con doble clic.
+- **`encaje-*-x86_64.tar.gz`**: binario + acceso directo del menú.
   Descomprime y ejecuta `./install.sh` (instala en `~/.local`, sin sudo;
   `./install.sh --uninstall` lo quita).
-- **`spacedesk-linux.apk`**: la app del móvil.
+- **`encaje.apk`**: la app del móvil.
 
-Al abrirlo desde el menú se abre una terminal con la IP y el estado; al
-cerrarla se cierra el monitor virtual. Opciones por defecto (ver
-[Opciones](#opciones)) en `~/.config/spacedesk-linux.conf`, por ejemplo:
+Al abrirlo desde el menú aparece una ventana para elegir el modo: la
+tablet como segundo monitor o con el ratón y el teclado del PC. Al cerrarla
+se apaga. Desde una terminal (`encaje-launch`) arranca el servidor
+directamente, con su registro a la vista. Opciones por defecto (ver
+[Opciones](#opciones)) en `~/.config/encaje.conf`, por ejemplo:
 
 ```
 --fps 60 --bitrate 20000
@@ -42,7 +44,7 @@ Los paquetes se generan con `packaging/build-dist.sh`.
 ```bash
 scripts/setup-deps.sh          # una vez: cabeceras de PipeWire sin sudo
 cargo build --release
-./target/release/linux-spacedesk-clone --width 2340 --height 1080 --fps 60
+./target/release/encaje --width 2340 --height 1080 --fps 60
 ```
 
 Aparece un monitor nuevo en *Configuración → Pantallas*; puedes arrastrar
@@ -52,8 +54,8 @@ ventanas a él. Al cerrar el programa (Ctrl+C) desaparece.
 
 1. Activa *Opciones de desarrollador → Depuración USB* y conecta el cable.
 2. Instala la app: `android/build-apk.sh --install` (o copia
-   `android/spacedesk-linux.apk` al móvil).
-3. Abre **Spacedesk Linux**: detecta el PC sola y entra a pantalla completa.
+   `android/encaje.apk` al móvil).
+3. Abre **Encaje**: detecta el PC sola y entra a pantalla completa.
 
 El servidor ejecuta `adb reverse tcp:8787 tcp:8787` en cada móvil conectado
 (y lo repite si el móvil se reconecta). Por USB se usa WebSocket +
@@ -86,7 +88,7 @@ al volver, el ratón regresa al PC. Como Barrier o Deskflow, pero sin
 instalar nada en la tablet.
 
 ```bash
-./target/release/linux-spacedesk-clone --input-only    # o --solo-entrada
+./target/release/encaje --input-only    # o --solo-entrada
 ```
 
 1. Conecta la tablet por USB con la *Depuración USB* activada.
@@ -116,7 +118,7 @@ instalada: Android sólo guarda imágenes como URI `content://`, y es la app
   Al girar la tablet, el monitor cambia de forma.
 - La distribución del teclado la decide Android: si tu teclado no es
   inglés, elígela una vez en la tablet en *Ajustes → Administración
-  general → Teclado físico → Spacedesk Linux Keyboard*.
+  general → Teclado físico → Encaje Keyboard*.
 - GNOME se queda algunos atajos (la tecla Super, Alt+Tab).
 - Con varios dispositivos conectados, elige uno con `ANDROID_SERIAL=…`.
 

@@ -1,4 +1,4 @@
-package dev.spacedesk.linux;
+package dev.encaje;
 
 import android.net.LocalServerSocket;
 import android.net.LocalSocket;
@@ -27,9 +27,9 @@ import java.util.regex.Pattern;
  *
  * Se ejecuta con permisos de shell (el grupo uhid da acceso a /dev/uhid):
  *   adb push input-server.jar /data/local/tmp/
- *   adb shell CLASSPATH=/data/local/tmp/input-server.jar app_process / dev.spacedesk.linux.InputServer
+ *   adb shell CLASSPATH=/data/local/tmp/input-server.jar app_process / dev.encaje.InputServer
  *
- * Protocolo por el socket local "spacedesk-input":
+ * Protocolo por el socket local "encaje-input":
  *   PC → tablet: [u8 dispositivo (0 ratón, 1 teclado)] [u8 longitud] [informe HID]
  *   tablet → PC: [u8 1] [f32 px por unidad de ratón] [u16 ancho] [u16 alto]
  *                al conectar y cada vez que gira la pantalla (big endian).
@@ -43,7 +43,7 @@ import java.util.regex.Pattern;
  * la aceleración y el proceso termina.
  */
 public final class InputServer {
-    private static final String SOCKET = "spacedesk-input";
+    private static final String SOCKET = "encaje-input";
 
     private static final int UHID_DESTROY = 1;
     private static final int UHID_CREATE2 = 11;
@@ -100,8 +100,8 @@ public final class InputServer {
 
         Runtime.getRuntime().addShutdownHook(new Thread(InputServer::cleanup));
         disableAcceleration();
-        mouse = create("Spacedesk Linux Mouse", 0x0001, MOUSE);
-        keyboard = create("Spacedesk Linux Keyboard", 0x0002, KEYBOARD);
+        mouse = create("Encaje Mouse", 0x0001, MOUSE);
+        keyboard = create("Encaje Keyboard", 0x0002, KEYBOARD);
         try {
             DataOutputStream out = new DataOutputStream(client.getOutputStream());
             float scale = calibrate();
@@ -144,7 +144,7 @@ public final class InputServer {
      * muere sin restaurarlos (adb desconectado de golpe), la siguiente
      * ejecución los recupera de ahí en lugar de leer los ya desactivados.
      */
-    private static final String SAVED_FILE = "/data/local/tmp/spacedesk-accel.saved";
+    private static final String SAVED_FILE = "/data/local/tmp/encaje-accel.saved";
 
     private static void disableAcceleration() {
         String[] previous = sh("cat " + SAVED_FILE + " 2>/dev/null").split("\n");

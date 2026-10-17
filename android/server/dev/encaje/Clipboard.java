@@ -1,4 +1,4 @@
-package dev.spacedesk.linux;
+package dev.encaje;
 
 import android.content.ClipData;
 import android.content.ClipDescription;
@@ -41,7 +41,7 @@ final class Clipboard {
     }
 
     private static final String PACKAGE = "com.android.shell";
-    private static final String PROVIDER = "content://dev.spacedesk.linux.clip/";
+    private static final String PROVIDER = "content://dev.encaje.clip/";
     private static final int MAX_IMAGE = 32 << 20;
 
     private final Object service;
@@ -131,7 +131,7 @@ final class Clipboard {
     }
 
     void writeText(String text) throws Exception {
-        ClipData clip = ClipData.newPlainText("Spacedesk Linux", text);
+        ClipData clip = ClipData.newPlainText("Encaje", text);
         set.invoke(service, args(clip, set.getParameterCount()));
     }
 
@@ -147,7 +147,7 @@ final class Clipboard {
         if (p.waitFor() != 0 || err.contains("Exception")) {
             throw new Exception("no se pudo guardar la imagen (¿está instalada la app actualizada?): " + err.trim());
         }
-        ClipDescription desc = new ClipDescription("Spacedesk Linux", new String[] {"image/png"});
+        ClipDescription desc = new ClipDescription("Encaje", new String[] {"image/png"});
         ClipData clip = new ClipData(desc, new ClipData.Item(Uri.parse(uri)));
         ownUri = uri;
         set.invoke(service, args(clip, set.getParameterCount()));

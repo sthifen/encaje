@@ -1,4 +1,4 @@
-//! spacedesk-linux: monitor virtual para GNOME/Wayland transmitido a un
+//! Encaje: monitor virtual para GNOME/Wayland transmitido a un
 //! navegador o a la app Android, por WiFi (WebRTC) o por cable USB (ADB).
 //!
 //! Flujo: Mutter (monitor virtual) → PipeWire → H.264 (NVENC/VA-API/OpenH264) →
@@ -29,7 +29,7 @@ use clap::Parser;
 use tokio::sync::{broadcast, mpsc};
 
 #[derive(Parser)]
-#[command(version, about = "Monitor virtual estilo Spacedesk para Linux (GNOME/Wayland)")]
+#[command(version, about = "Encaje: la tablet como segundo monitor o con el ratón y el teclado del PC (GNOME/Wayland)")]
 struct Args {
     /// Ancho fijo del monitor virtual. Sin --width/--height la resolución
     /// se adapta a la pantalla de cada visor (y a su escala de rendimiento).
@@ -75,7 +75,7 @@ fn main() -> Result<()> {
     // RUST_LOG permite más detalle, p. ej. RUST_LOG=debug. El registro va a
     // stderr: stdout queda para los eventos de la interfaz.
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| "error,linux_spacedesk_clone=info".into());
+        .unwrap_or_else(|_| "error,encaje=info".into());
     tracing_subscriber::fmt()
         .with_target(false)
         .with_env_filter(filter)

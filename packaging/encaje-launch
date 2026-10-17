@@ -1,21 +1,21 @@
 #!/bin/sh
-# Lanzador de Spacedesk Linux.
+# Lanzador de Encaje.
 #
 # Desde el menú de aplicaciones abre la ventana para elegir el modo (tablet
 # como segundo monitor, o sólo ratón y teclado). Desde una terminal arranca
 # el servidor directamente.
 #
-# Opciones por defecto en ~/.config/spacedesk-linux.conf, p. ej.:
+# Opciones por defecto en ~/.config/encaje.conf, p. ej.:
 #   --width 2340 --height 1080 --fps 60
-# (o en la variable SPACEDESK_ARGS). Los argumentos de la línea de órdenes
+# (o en la variable ENCAJE_ARGS). Los argumentos de la línea de órdenes
 # se añaden después.
 
 HERE="$(dirname "$(readlink -f "$0")")"
-BIN="$HERE/linux-spacedesk-clone"
-[ -x "$BIN" ] || BIN="$HERE/usr/bin/linux-spacedesk-clone" # dentro del AppImage
-CONF="${XDG_CONFIG_HOME:-$HOME/.config}/spacedesk-linux.conf"
+BIN="$HERE/encaje"
+[ -x "$BIN" ] || BIN="$HERE/usr/bin/encaje" # dentro del AppImage
+CONF="${XDG_CONFIG_HOME:-$HOME/.config}/encaje.conf"
 
-DEFAULTS="${SPACEDESK_ARGS:-}"
+DEFAULTS="${ENCAJE_ARGS:-}"
 [ -z "$DEFAULTS" ] && [ -f "$CONF" ] && DEFAULTS="$(grep -v '^#' "$CONF" | tr '\n' ' ')"
 
 # Desde una terminal: el servidor directamente, con su registro a la vista.
@@ -25,5 +25,5 @@ if [ -t 1 ]; then
 fi
 
 # Desde el menú de aplicaciones: la ventana para elegir el modo (lee ella
-# misma ~/.config/spacedesk-linux.conf).
+# misma ~/.config/encaje.conf).
 exec "$BIN" --gui "$@"

@@ -25,7 +25,7 @@ MIN_SDK=24
 BT="$SDK/build-tools/$BT_VER"
 ANDROID_JAR="$SDK/platforms/$PLATFORM/android.jar"
 OUT="$HERE/build"
-APK="$HERE/spacedesk-linux.apk"
+APK="$HERE/encaje.apk"
 
 fetch() { # fetch <zip> <destino>
   local tmp; tmp="$(mktemp -d)"
@@ -74,7 +74,7 @@ KEYSTORE="$HERE/debug.keystore"
 if [[ ! -f "$KEYSTORE" ]]; then
   keytool -genkeypair -keystore "$KEYSTORE" -storepass android -keypass android \
     -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 \
-    -dname "CN=Spacedesk Linux Debug" >/dev/null 2>&1
+    -dname "CN=Encaje Debug" >/dev/null 2>&1
 fi
 "$BT/zipalign" -P 16 -f 4 "$OUT/base.apk" "$OUT/aligned.apk"
 "$BT/apksigner" sign --ks "$KEYSTORE" --ks-pass pass:android --key-pass pass:android \
@@ -85,5 +85,5 @@ echo "✓ $HERE/input-server.jar ($(du -h "$HERE/input-server.jar" | cut -f1))"
 
 if [[ "${1:-}" == "--install" ]]; then
   adb install -r "$APK"
-  adb shell am start -n dev.spacedesk.linux/.MainActivity
+  adb shell am start -n dev.encaje/.MainActivity
 fi

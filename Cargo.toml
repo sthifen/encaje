@@ -1,6 +1,6 @@
 [package]
-name = "linux-spacedesk-clone"
-version = "0.5.0"
+name = "encaje"
+version = "0.6.0"
 edition = "2024"
 
 [dependencies]

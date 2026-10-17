@@ -45,8 +45,8 @@ pub async fn watch(port: u16) {
 }
 
 /// Paquete y actividad de la app del visor.
-const APP: &str = "dev.spacedesk.linux";
-const ACTIVITY: &str = "dev.spacedesk.linux/.MainActivity";
+const APP: &str = "dev.encaje";
+const ACTIVITY: &str = "dev.encaje/.MainActivity";
 
 /// Abre la app del visor (si ya está abierta, la trae al frente).
 async fn open_app(serial: &str) {

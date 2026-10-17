@@ -105,7 +105,7 @@ pub async fn answer(
     let track = Arc::new(TrackLocalStaticSample::new(
         Instant::now(),
         MediaStreamTrack::new(
-            "spacedesk".to_owned(),
+            "encaje".to_owned(),
             "screen".to_owned(),
             "screen".to_owned(),
             RtpCodecKind::Video,

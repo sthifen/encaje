@@ -1,11 +1,11 @@
 [Desktop Entry]
 Type=Application
-Name=Spacedesk Linux
+Name=Encaje
 GenericName=Monitor virtual
 Comment=Usa tu tablet como segundo monitor o con el ratón y el teclado del PC
-Exec=spacedesk-linux
-Icon=spacedesk-linux
+Exec=encaje-launch
+Icon=encaje
 Terminal=false
 Categories=Utility;
-Keywords=monitor;pantalla;display;spacedesk;android;
+Keywords=monitor;pantalla;display;tablet;tableta;android;teclado;ratón;
 StartupNotify=false

@@ -1,4 +1,4 @@
-package dev.spacedesk.linux;
+package dev.encaje;
 
 import android.content.ContentProvider;
 import android.content.ContentValues;

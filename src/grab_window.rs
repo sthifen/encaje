@@ -141,7 +141,7 @@ impl App {
         // Sin el fullscreen de winit (necesita su lista de monitores): se
         // crea encima del monitor y se pide pantalla completa al gestor.
         let attrs = Window::default_attributes()
-            .with_title("Spacedesk Linux (tablet)")
+            .with_title("Encaje (tablet)")
             .with_decorations(false)
             .with_position(PhysicalPosition::new(m.x, m.y))
             .with_inner_size(PhysicalSize::new(m.w, m.h));

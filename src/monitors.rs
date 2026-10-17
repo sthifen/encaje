@@ -9,7 +9,7 @@
 //! * Cuando aparece, se vuelve a aplicar esa configuración y se coloca el
 //!   monitor virtual donde lo dejaste la última vez (`keep`).
 //! * Si lo mueves en Configuración → Pantallas, la posición se guarda en
-//!   `~/.config/spacedesk-linux/layout.json`, una por cada combinación de
+//!   `~/.config/encaje/layout.json`, una por cada combinación de
 //!   monitores físicos (no es lo mismo el portátil solo que con el HDMI).
 //! * Al quitar el monitor virtual Mutter vuelve a su disposición por defecto,
 //!   así que se repone la que tenías (`Keeper::restore`).
@@ -209,7 +209,7 @@ fn layout_file() -> PathBuf {
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".config"));
-    base.join("spacedesk-linux").join("layout.json")
+    base.join("encaje").join("layout.json")
 }
 
 fn load_offsets() -> HashMap<String, Offset> {

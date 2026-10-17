@@ -924,6 +924,40 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0e9c71c2167ca323c882b99918929403426e2373ea17242ff5653e0d5e1058be"
 
 [[package]]
+name = "encaje"
+version = "0.6.0"
+dependencies = [
+ "anyhow",
+ "arboard",
+ "async-trait",
+ "axum",
+ "bytes",
+ "clap",
+ "futures-util",
+ "gstreamer",
+ "gstreamer-app",
+ "gstreamer-video",
+ "gtk4",
+ "image",
+ "libc",
+ "openh264",
+ "pipewire",
+ "rtc",
+ "serde",
+ "serde_json",
+ "softbuffer",
+ "tiny-skia",
+ "tokio",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "webrtc",
+ "winit",
+ "x11rb",
+ "zbus",
+]
+
+[[package]]
 name = "endi"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2075,40 +2109,6 @@ name = "linux-raw-sys"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
-
-[[package]]
-name = "linux-spacedesk-clone"
-version = "0.5.0"
-dependencies = [
- "anyhow",
- "arboard",
- "async-trait",
- "axum",
- "bytes",
- "clap",
- "futures-util",
- "gstreamer",
- "gstreamer-app",
- "gstreamer-video",
- "gtk4",
- "image",
- "libc",
- "openh264",
- "pipewire",
- "rtc",
- "serde",
- "serde_json",
- "softbuffer",
- "tiny-skia",
- "tokio",
- "tower-http",
- "tracing",
- "tracing-subscriber",
- "webrtc",
- "winit",
- "x11rb",
- "zbus",
-]
 
 [[package]]
 name = "litemap"

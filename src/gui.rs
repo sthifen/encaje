@@ -89,8 +89,8 @@ struct State {
 }
 
 const CSS: &str = r#"
-window.spacedesk { background: transparent; }
-window.spacedesk.csd {
+window.encaje { background: transparent; }
+window.encaje.csd {
   border-radius: 28px;
   box-shadow: 0 22px 60px rgba(0,0,0,0.50), 0 0 0 1px rgba(255,255,255,0.10);
 }
@@ -139,7 +139,7 @@ button.light:hover { filter: brightness(1.15); }
 "#;
 
 pub fn run() -> Result<()> {
-    let app = gtk::Application::builder().application_id("dev.spacedesk.linux").build();
+    let app = gtk::Application::builder().application_id("dev.encaje").build();
     // Sólo en la instancia principal: otra ejecución de la interfaz se limita
     // a activar ésta.
     app.connect_startup(|_| stop_strays());
@@ -180,10 +180,10 @@ fn build(app: &gtk::Application) {
         .default_width(600)
         .default_height(320)
         .resizable(false)
-        .icon_name("spacedesk-linux")
-        .title("Spacedesk Linux")
+        .icon_name("encaje")
+        .title("Encaje")
         .build();
-    window.add_css_class("spacedesk");
+    window.add_css_class("encaje");
     // Sin barra de título: los semáforos van dentro del cristal.
     window.set_titlebar(Some(&gtk::Box::new(gtk::Orientation::Horizontal, 0)));
 
@@ -498,9 +498,9 @@ fn config_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".config"))
 }
 
-/// Opciones de ~/.config/spacedesk-linux.conf (las mismas que el lanzador).
+/// Opciones de ~/.config/encaje.conf (las mismas que el lanzador).
 fn config_args() -> Vec<String> {
-    let conf = std::fs::read_to_string(config_dir().join("spacedesk-linux.conf")).unwrap_or_default();
+    let conf = std::fs::read_to_string(config_dir().join("encaje.conf")).unwrap_or_default();
     conf.lines()
         .filter(|l| !l.trim_start().starts_with('#'))
         .flat_map(|l| l.split_whitespace().map(str::to_owned).collect::<Vec<_>>())
@@ -508,7 +508,7 @@ fn config_args() -> Vec<String> {
 }
 
 fn last_mode_file() -> PathBuf {
-    config_dir().join("spacedesk-linux").join("gui.json")
+    config_dir().join("encaje").join("gui.json")
 }
 
 fn load_last_mode() -> Option<Mode> {

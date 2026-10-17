@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="dev.spacedesk.linux">
+    package="dev.encaje">
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
@@ -29,7 +29,7 @@
         <!-- Imagen copiada en el PC, para el portapapeles (ClipProvider). -->
         <provider
             android:name=".ClipProvider"
-            android:authorities="dev.spacedesk.linux.clip"
+            android:authorities="dev.encaje.clip"
             android:exported="true" />
     </application>
 </manifest>

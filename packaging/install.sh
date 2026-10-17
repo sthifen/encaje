@@ -1,5 +1,5 @@
 #!/bin/sh
-# Instala Spacedesk Linux para el usuario actual (sin sudo):
+# Instala Encaje para el usuario actual (sin sudo):
 #   ~/.local/bin/                      binario y lanzador
 #   ~/.local/share/applications/       acceso directo del menú
 #   ~/.local/share/icons/hicolor/...   icono
@@ -12,21 +12,21 @@ APP_DIR="$HOME/.local/share/applications"
 ICON_DIR="$HOME/.local/share/icons/hicolor/scalable/apps"
 
 if [ "${1:-}" = "--uninstall" ]; then
-    rm -f "$BIN_DIR/linux-spacedesk-clone" "$BIN_DIR/spacedesk-linux" \
-          "$APP_DIR/spacedesk-linux.desktop" "$ICON_DIR/spacedesk-linux.svg"
-    echo "Spacedesk Linux desinstalado."
+    rm -f "$BIN_DIR/encaje" "$BIN_DIR/encaje-launch" \
+          "$APP_DIR/encaje.desktop" "$ICON_DIR/encaje.svg"
+    echo "Encaje desinstalado."
     exit 0
 fi
 
 mkdir -p "$BIN_DIR" "$APP_DIR" "$ICON_DIR"
-install -m 755 "$HERE/linux-spacedesk-clone" "$BIN_DIR/linux-spacedesk-clone"
-install -m 755 "$HERE/spacedesk-linux" "$BIN_DIR/spacedesk-linux"
-install -m 644 "$HERE/spacedesk-linux.svg" "$ICON_DIR/spacedesk-linux.svg"
+install -m 755 "$HERE/encaje" "$BIN_DIR/encaje"
+install -m 755 "$HERE/encaje-launch" "$BIN_DIR/encaje-launch"
+install -m 644 "$HERE/encaje.svg" "$ICON_DIR/encaje.svg"
 # Ruta absoluta: ~/.local/bin puede no estar en el PATH del menú.
-sed "s|^Exec=.*|Exec=$BIN_DIR/spacedesk-linux|" \
-    "$HERE/spacedesk-linux.desktop" > "$APP_DIR/spacedesk-linux.desktop"
-chmod 644 "$APP_DIR/spacedesk-linux.desktop"
+sed "s|^Exec=.*|Exec=$BIN_DIR/encaje-launch|" \
+    "$HERE/encaje.desktop" > "$APP_DIR/encaje.desktop"
+chmod 644 "$APP_DIR/encaje.desktop"
 command -v update-desktop-database >/dev/null && update-desktop-database "$APP_DIR" 2>/dev/null || true
 
-echo "✓ Instalado. Busca «Spacedesk Linux» en el menú de aplicaciones"
-echo "  o ejecuta: spacedesk-linux"
+echo "✓ Instalado. Busca «Encaje» en el menú de aplicaciones"
+echo "  o ejecuta: encaje-launch"
