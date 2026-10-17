@@ -77,6 +77,41 @@ enlace simulado de 7 Mbit/s el retraso de cola pasa de ~3 s a ~11 ms).
 En la app, escribe la IP del PC en el recuadro *WiFi*, o abre
 `http://IP-DEL-PC:8787` en cualquier navegador. Se usa WebRTC.
 
+### Sólo ratón y teclado (`--input-only`)
+
+La tablet sigue mostrando **su propio Android** y no se transmite nada de
+pantalla: el monitor virtual sólo sirve para que GNOME sepa dónde está.
+Al mover el ratón hacia él, aparece el puntero de Android en la tablet;
+al volver, el ratón regresa al PC. Como Barrier o Deskflow, pero sin
+instalar nada en la tablet.
+
+```bash
+./target/release/linux-spacedesk-clone --input-only    # o --solo-entrada
+```
+
+1. Conecta la tablet por USB con la *Depuración USB* activada.
+2. En *Configuración → Pantallas*, coloca el monitor nuevo donde está la
+   tablet (a la derecha, encima…).
+3. Para escribir en la tablet, **haz un clic en ella**: el teclado va
+   donde hiciste el último clic, igual que con cualquier ventana.
+
+Cómo funciona: por adb se lanza en la tablet un pequeño servidor
+(`android/server`, con permisos de *shell*, sin root ni app) que crea un
+ratón y un teclado HID virtuales. Android los trata como periféricos
+reales, así que dibuja su puntero y entiende atajos y teclas especiales.
+Android 16 ignora los ratones HID absolutos, así que el ratón es relativo:
+mientras dura la sesión se desactiva la aceleración del puntero (y se
+restaura al salir), y el PC lleva la cuenta de dónde está el puntero.
+
+- El monitor virtual mide lo mismo que la tablet en "unidades de ratón",
+  así que el puntero va a la misma velocidad que un ratón conectado a ella.
+  Al girar la tablet, el monitor cambia de forma.
+- La distribución del teclado la decide Android: si tu teclado no es
+  inglés, elígela una vez en la tablet en *Ajustes → Administración
+  general → Teclado físico → Spacedesk Linux Keyboard*.
+- GNOME se queda algunos atajos (la tecla Super, Alt+Tab).
+- Con varios dispositivos conectados, elige uno con `ANDROID_SERIAL=…`.
+
 ## Resolución y rendimiento
 
 La resolución del monitor virtual **se adapta a la pantalla que se conecta**:
@@ -108,6 +143,7 @@ guarda en cada dispositivo. Si se conectan varios a la vez, manda el último.
 | `--encoder` | `auto` | `nvenc`, `vaapi`, `openh264`. `auto` prueba el hardware y usa la CPU si falla. |
 | `--port` | 8787 | Puerto HTTP. |
 | `--no-usb` | | No ejecutar `adb reverse`. |
+| `--input-only` | | Sólo ratón y teclado; ver [arriba](#sólo-ratón-y-teclado---input-only). |
 
 `RUST_LOG=debug` muestra más detalle. Cada 5 s se registran los fps de
 captura y envío, el coste de codificar y la edad del frame.
@@ -131,6 +167,9 @@ OpenH264 sólo es razonable hasta ~1280×720.
 | `src/server.rs` | HTTP (axum): visor, `/offer` WebRTC, `/ws/video`, `/ws/input`. |
 | `src/rtc_peer.rs` | Un `PeerConnection` (webrtc-rs) por visor, sin trickle ICE. |
 | `src/adb.rs` | Modo USB (`adb reverse` automático). |
+| `src/input_only.rs` | Modo `--input-only`: servidor en la tablet y posición del puntero. |
+| `src/grab_window.rs` | Ventana invisible sobre el monitor virtual que recoge ratón y teclado. |
+| `android/server/` | Servidor UHID para la tablet; `android/build-apk.sh` genera `input-server.jar`. |
 | `web/index.html` | Visor (incrustado en el binario). |
 | `android/` | App: WebView a pantalla completa y lanzador USB/WiFi. Se compila sin Gradle. |
 
@@ -143,4 +182,3 @@ OpenH264 sólo es razonable hasta ~1280×720.
   periódico (cada 2 s).
 - El backend VA-API no se ha probado (en este equipo el driver de Intel no
   codifica H.264).
-- La resolución se fija al arrancar; no se adapta a cada cliente.

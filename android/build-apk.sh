@@ -7,6 +7,9 @@
 # (por defecto ~/Android/Sdk). Su uso está sujeto a la licencia del Android SDK:
 # https://developer.android.com/studio/terms
 #
+# También compila android/input-server.jar (modo --solo-entrada), que el
+# binario de Linux lleva incrustado.
+#
 # Uso:  android/build-apk.sh [--install]
 set -euo pipefail
 
@@ -52,11 +55,19 @@ echo "→ java"
 "${JAVAC[@]}" -source 17 -target 17 -nowarn -Xlint:-options -encoding UTF-8 \
   -classpath "$ANDROID_JAR" -d "$OUT/classes" \
   $(find "$HERE/src" "$OUT/gen" -name '*.java')
+"${JAVAC[@]}" -source 17 -target 17 -nowarn -Xlint:-options -encoding UTF-8 \
+  -classpath "$ANDROID_JAR" -d "$OUT/server-classes" \
+  $(find "$HERE/server" -name '*.java')
 
 echo "→ dex"
 "$BT/d8" --release --min-api $MIN_SDK --lib "$ANDROID_JAR" --output "$OUT/dex" \
   $(find "$OUT/classes" -name '*.class')
 (cd "$OUT/dex" && zip -q "$OUT/base.apk" classes.dex)
+mkdir -p "$OUT/server-dex"
+"$BT/d8" --release --min-api $MIN_SDK --lib "$ANDROID_JAR" --output "$OUT/server-dex" \
+  $(find "$OUT/server-classes" -name '*.class')
+rm -f "$HERE/input-server.jar"
+(cd "$OUT/server-dex" && zip -q -X "$HERE/input-server.jar" classes.dex)
 
 echo "→ firma"
 KEYSTORE="$HERE/debug.keystore"
@@ -70,6 +81,7 @@ fi
   --out "$APK" "$OUT/aligned.apk"
 "$BT/apksigner" verify "$APK"
 echo "✓ $APK ($(du -h "$APK" | cut -f1))"
+echo "✓ $HERE/input-server.jar ($(du -h "$HERE/input-server.jar" | cut -f1))"
 
 if [[ "${1:-}" == "--install" ]]; then
   adb install -r "$APK"

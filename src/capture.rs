@@ -136,8 +136,10 @@ struct StreamState {
     geometry: Arc<Geometry>,
 }
 
-/// Lanza el hilo de captura conectado al nodo `node_id`.
-pub fn spawn(node_id: u32, width: u32, height: u32, fps: u32, slot: Arc<FrameSlot>) -> Capture {
+/// Lanza el hilo de captura conectado al nodo `node_id`. Si el flujo falla
+/// (p. ej. Mutter cerró la sesión) termina el proceso, salvo con
+/// `exit_on_error = false`, para quien vigila `VirtualDisplay::closed`.
+pub fn spawn(node_id: u32, width: u32, height: u32, fps: u32, slot: Arc<FrameSlot>, exit_on_error: bool) -> Capture {
     let (resize_tx, resize_rx) = pw::channel::channel();
     let geometry = Arc::new(Geometry::default());
     geometry.set(width, height);
@@ -146,8 +148,11 @@ pub fn spawn(node_id: u32, width: u32, height: u32, fps: u32, slot: Arc<FrameSlo
         .name("pipewire-capture".into())
         .spawn(move || {
             if let Err(e) = run(node_id, width, height, fps, slot, geo, resize_rx) {
-                tracing::error!("captura PipeWire terminó con error: {e:#}");
-                std::process::exit(1);
+                if exit_on_error {
+                    tracing::error!("captura PipeWire terminó con error: {e:#}");
+                    std::process::exit(1);
+                }
+                tracing::debug!("captura PipeWire terminó: {e:#}");
             }
         })
         .expect("no se pudo crear el hilo de captura");
@@ -180,10 +185,15 @@ fn run(
 
     let state = StreamState { format: Default::default(), slot, geometry };
 
+    // Si Mutter cierra la sesión el flujo se desconecta: terminar el hilo.
+    let quit = mainloop.clone();
     let _listener = stream
         .add_local_listener_with_user_data(state)
-        .state_changed(|_, _, old, new| {
+        .state_changed(move |_, _, old, new| {
             tracing::info!("PipeWire: {old:?} -> {new:?}");
+            if matches!(new, pw::stream::StreamState::Error(_) | pw::stream::StreamState::Unconnected) {
+                quit.quit();
+            }
         })
         .param_changed(|_, state, id, param| {
             let Some(param) = param else { return };

@@ -2,7 +2,7 @@
 Type=Application
 Name=Spacedesk Linux
 GenericName=Monitor virtual
-Comment=Usa tu móvil o tablet como segunda pantalla (USB o WiFi)
+Comment=Usa tu tablet como segundo monitor o con el ratón y el teclado del PC
 Exec=spacedesk-linux
 Icon=spacedesk-linux
 Terminal=false

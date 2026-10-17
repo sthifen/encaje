@@ -3,11 +3,20 @@
 //!
 //! Flujo: Mutter (monitor virtual) → PipeWire → H.264 (NVENC/VA-API/OpenH264) →
 //! broadcast → { WebRTC | WebSocket+WebCodecs } → visor.
+//!
+//! Con `--input-only` no se transmite nada: la tablet sigue con su Android y
+//! recibe el ratón y el teclado del PC (ver `input_only.rs`).
 
 mod adb;
 mod capture;
 mod display;
 mod encoder;
+mod events;
+mod grab_window;
+mod gui;
+mod input_only;
+mod monitors;
+mod overlay;
 mod rtc_peer;
 mod server;
 
@@ -46,17 +55,53 @@ struct Args {
     /// No configurar `adb reverse` automáticamente para móviles por USB
     #[arg(long)]
     no_usb: bool,
+    /// No transmitir la pantalla: la tablet (por USB) sigue mostrando Android
+    /// y el ratón y el teclado pasan a ella al entrar en el monitor virtual
+    #[arg(long, visible_alias = "solo-entrada")]
+    input_only: bool,
+    /// Ventana para elegir el modo (la usa el acceso directo del menú)
+    #[arg(long)]
+    gui: bool,
+    /// Escribir eventos en JSON para la interfaz (líneas que empiezan por @)
+    #[arg(long, hide = true)]
+    events: bool,
+    /// Animación de conexión (uso interno de la interfaz)
+    #[arg(long, hide = true)]
+    overlay: Option<String>,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    // RUST_LOG permite más detalle, p. ej. RUST_LOG=debug.
+fn main() -> Result<()> {
+    // RUST_LOG permite más detalle, p. ej. RUST_LOG=debug. El registro va a
+    // stderr: stdout queda para los eventos de la interfaz.
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| "error,linux_spacedesk_clone=info".into());
-    tracing_subscriber::fmt().with_target(false).with_env_filter(filter).init();
+    tracing_subscriber::fmt()
+        .with_target(false)
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .init();
     let args = Args::parse();
+    // La interfaz y la animación usan su propio bucle (GTK / X11), sin tokio.
+    if args.gui {
+        return gui::run();
+    }
+    if let Some(spec) = &args.overlay {
+        return overlay::run(spec);
+    }
+    tokio::runtime::Runtime::new()?.block_on(serve(args))
+}
+
+async fn serve(args: Args) -> Result<()> {
+    if args.events {
+        events::enable();
+    }
     let fixed = args.width.zip(args.height).map(|(w, h)| (w & !1, h & !1));
     let (width, height) = fixed.unwrap_or((1920, 1080));
+
+    if args.input_only {
+        let env = display::Environment::detect();
+        return input_only::run(&env, fixed).await;
+    }
 
     // Reservar el puerto antes de crear el monitor virtual.
     let addr = SocketAddr::new(args.bind, args.port);
@@ -67,11 +112,13 @@ async fn main() -> Result<()> {
     let env = display::Environment::detect();
     tracing::info!("sesión: {} / escritorio: {}", env.session_type, env.desktop);
 
+    let before = monitors::snapshot().await?;
     let display = Arc::new(display::VirtualDisplay::create(&env, width, height).await?);
+    events::set_monitor(monitors::keep(before));
 
     // Captura → codificador (hilos nativos) → broadcast a clientes (tokio).
     let slot = Arc::new(capture::FrameSlot::default());
-    let capture = capture::spawn(display.node_id, width, height, args.fps, slot.clone());
+    let capture = capture::spawn(display.node_id, width, height, args.fps, slot.clone(), true);
     let (frames_tx, _) = broadcast::channel(8);
     let keyreq = encoder::KeyframeRequest::default();
     let rate = encoder::BitrateControl::new(args.bitrate);
@@ -117,6 +164,7 @@ async fn main() -> Result<()> {
     tokio::select! {
         r = server::serve(state, listener) => r?,
         _ = tokio::signal::ctrl_c() => tracing::info!("cerrando…"),
+        _ = display.closed() => anyhow::bail!("GNOME cerró la sesión (se pulsó «Dejar de compartir»)"),
     }
     display.stop().await;
     Ok(())

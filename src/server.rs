@@ -76,7 +76,10 @@ async fn offer(
     tracing::info!("oferta WebRTC de {peer}");
     match crate::rtc_peer::answer(offer, peer.ip(), s.frames.subscribe(), s.keyreq.clone()).await
     {
-        Ok(answer) => Json(answer).into_response(),
+        Ok(answer) => {
+            crate::events::connected();
+            Json(answer).into_response()
+        }
         Err(e) => {
             tracing::warn!("WebRTC {peer}: {e:#}");
             (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")).into_response()
@@ -91,8 +94,10 @@ async fn ws_video(
 ) -> Response {
     ws.on_upgrade(move |socket| async move {
         tracing::info!("visor WebSocket conectado: {peer}");
+        crate::events::connected();
         stream_video(socket, s).await;
         tracing::info!("visor WebSocket desconectado: {peer}");
+        crate::events::emit("disconnected");
     })
 }
 

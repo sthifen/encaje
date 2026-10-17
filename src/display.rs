@@ -47,6 +47,8 @@ trait RemoteDesktopSession {
     fn notify_touch_motion(&self, stream: &str, slot: u32, x: f64, y: f64) -> zbus::Result<()>;
     fn notify_touch_up(&self, slot: u32) -> zbus::Result<()>;
     fn notify_keyboard_keysym(&self, keysym: u32, state: bool) -> zbus::Result<()>;
+    #[zbus(signal)]
+    fn closed(&self) -> zbus::Result<()>;
     #[zbus(property)]
     fn session_id(&self) -> zbus::Result<String>;
 }
@@ -121,6 +123,7 @@ pub struct VirtualDisplay {
     remote: RemoteDesktopSessionProxy<'static>,
     stream_path: String,
     pub node_id: u32,
+    closed: tokio::sync::watch::Receiver<bool>,
 }
 
 impl VirtualDisplay {
@@ -179,7 +182,14 @@ impl VirtualDisplay {
             .build()
             .await?;
 
-        // Hay que suscribirse a la señal antes de arrancar la sesión.
+        // Mutter cierra la sesión si pulsas "Dejar de compartir" en la barra
+        // superior. Hay que suscribirse a las señales antes de arrancarla.
+        let mut closed_signal = remote.receive_closed().await?;
+        let (closed_tx, closed) = tokio::sync::watch::channel(false);
+        tokio::spawn(async move {
+            closed_signal.next().await;
+            let _ = closed_tx.send(true);
+        });
         let mut added = stream.receive_pipewire_stream_added().await?;
         remote.start().await.context("no se pudo iniciar la sesión")?;
         let signal = tokio::time::timeout(std::time::Duration::from_secs(10), added.next())
@@ -193,7 +203,14 @@ impl VirtualDisplay {
             remote,
             stream_path: stream_path.to_string(),
             node_id,
+            closed,
         })
+    }
+
+    /// Termina cuando Mutter cierra la sesión por su cuenta.
+    pub async fn closed(&self) {
+        let mut rx = self.closed.clone();
+        let _ = rx.wait_for(|c| *c).await;
     }
 
     pub async fn stop(&self) {

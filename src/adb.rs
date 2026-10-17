@@ -35,7 +35,7 @@ pub async fn watch(port: u16) {
     }
 }
 
-async fn adb(args: &[&str]) -> Option<String> {
+pub async fn adb(args: &[&str]) -> Option<String> {
     let out = Command::new("adb").args(args).output().await.ok()?;
     out.status
         .success()
@@ -48,7 +48,7 @@ async fn has_reverse(serial: &str, spec: &str) -> bool {
         .is_some_and(|list| list.lines().any(|l| l.split_whitespace().nth(1) == Some(spec)))
 }
 
-async fn list_devices() -> Vec<String> {
+pub async fn list_devices() -> Vec<String> {
     let Some(out) = adb(&["devices"]).await else { return Vec::new() };
     out.lines()
         .skip(1)
