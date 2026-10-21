@@ -32,6 +32,10 @@ webrtc = "0.21.1"
 winit = { version = "0.30", default-features = false, features = ["rwh_06", "x11"] }
 x11rb = { version = "0.13", features = ["randr", "shape", "xfixes"] }
 zbus = { version = "5.19.0", default-features = false, features = ["tokio"] }
+wayland-client = "0.31"
+wayland-scanner = "0.31"
+wayland-backend = "0.3"
+wayland-protocols = { version = "0.32", features = ["client", "unstable"] }
 
 [profile.release]
 lto = "thin"

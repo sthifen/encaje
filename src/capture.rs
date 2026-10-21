@@ -139,7 +139,11 @@ struct StreamState {
 /// Lanza el hilo de captura conectado al nodo `node_id`. Si el flujo falla
 /// (p. ej. Mutter cerró la sesión) termina el proceso, salvo con
 /// `exit_on_error = false`, para quien vigila `VirtualDisplay::closed`.
-pub fn spawn(node_id: u32, width: u32, height: u32, fps: u32, slot: Arc<FrameSlot>, exit_on_error: bool) -> Capture {
+///
+/// Con `follow = false` se pide exactamente `width`x`height` y el compositor
+/// pone el monitor a ese tamaño (Mutter). Con `follow = true` se acepta el
+/// tamaño que ofrezca, que sigue al modo del monitor (KWin).
+pub fn spawn(node_id: u32, width: u32, height: u32, fps: u32, follow: bool, slot: Arc<FrameSlot>, exit_on_error: bool) -> Capture {
     let (resize_tx, resize_rx) = pw::channel::channel();
     let geometry = Arc::new(Geometry::default());
     geometry.set(width, height);
@@ -147,7 +151,7 @@ pub fn spawn(node_id: u32, width: u32, height: u32, fps: u32, slot: Arc<FrameSlo
     std::thread::Builder::new()
         .name("pipewire-capture".into())
         .spawn(move || {
-            if let Err(e) = run(node_id, width, height, fps, slot, geo, resize_rx) {
+            if let Err(e) = run(node_id, (width, height), fps, follow, slot, geo, resize_rx) {
                 if exit_on_error {
                     tracing::error!("captura PipeWire terminó con error: {e:#}");
                     std::process::exit(1);
@@ -161,9 +165,9 @@ pub fn spawn(node_id: u32, width: u32, height: u32, fps: u32, slot: Arc<FrameSlo
 
 fn run(
     node_id: u32,
-    width: u32,
-    height: u32,
+    (width, height): (u32, u32),
     fps: u32,
+    follow: bool,
     slot: Arc<FrameSlot>,
     geometry: Arc<Geometry>,
     resize_rx: pw::channel::Receiver<(u32, u32)>,
@@ -251,7 +255,7 @@ fn run(
         })
         .register()?;
 
-    let format = video_format_pod(width, height, fps)?;
+    let format = video_format_pod(width, height, fps, follow)?;
     let mut params = [Pod::from_bytes(&format).ok_or_else(|| anyhow!("pod inválido"))?];
     stream.connect(
         spa::utils::Direction::Input,
@@ -263,7 +267,7 @@ fn run(
     let resizer = stream.clone();
     let _resize = resize_rx.attach(mainloop.loop_(), move |(w, h)| {
         tracing::info!("cambiando el monitor virtual a {w}x{h}");
-        let r = video_format_pod(w, h, fps).map_err(|e| e.to_string()).and_then(|bytes| {
+        let r = video_format_pod(w, h, fps, follow).map_err(|e| e.to_string()).and_then(|bytes| {
             let pod = Pod::from_bytes(&bytes).ok_or("pod inválido")?;
             resizer.update_params(&mut [pod]).map_err(|e| e.to_string())
         });
@@ -276,10 +280,24 @@ fn run(
     Ok(())
 }
 
-/// EnumFormat: vídeo crudo de 32 bits con tamaño fijo. Mutter usa este tamaño
-/// como resolución del monitor virtual.
-fn video_format_pod(width: u32, height: u32, fps: u32) -> Result<Vec<u8>> {
+/// EnumFormat: vídeo crudo de 32 bits. Con tamaño fijo Mutter lo usa como
+/// resolución del monitor virtual; con `follow` se acepta cualquiera.
+fn video_format_pod(width: u32, height: u32, fps: u32, follow: bool) -> Result<Vec<u8>> {
     use pw::spa::param::format::{FormatProperties, MediaSubtype, MediaType};
+    use pw::spa::utils::Rectangle;
+    let size = if follow {
+        pw::spa::pod::property!(
+            FormatProperties::VideoSize,
+            Choice,
+            Range,
+            Rectangle,
+            Rectangle { width, height },
+            Rectangle { width: 1, height: 1 },
+            Rectangle { width: 8192, height: 8192 }
+        )
+    } else {
+        pw::spa::pod::property!(FormatProperties::VideoSize, Rectangle, Rectangle { width, height })
+    };
     let obj = pw::spa::pod::object!(
         pw::spa::utils::SpaTypes::ObjectParamFormat,
         pw::spa::param::ParamType::EnumFormat,
@@ -296,11 +314,7 @@ fn video_format_pod(width: u32, height: u32, fps: u32) -> Result<Vec<u8>> {
             VideoFormat::RGBx,
             VideoFormat::RGBA,
         ),
-        pw::spa::pod::property!(
-            FormatProperties::VideoSize,
-            Rectangle,
-            pw::spa::utils::Rectangle { width, height }
-        ),
+        size,
         // Como gnome-remote-desktop: frames a ritmo variable (sólo cuando hay
         // cambios) con un máximo explícito.
         pw::spa::pod::property!(

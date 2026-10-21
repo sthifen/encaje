@@ -31,7 +31,7 @@ use tokio::sync::{mpsc, watch};
 use crate::adb::{adb, close_app, list_devices};
 use crate::grab_window::{self, GrabEvent};
 use crate::clipboard::{self, Clip};
-use crate::{capture, display, events, monitors};
+use crate::{backend, capture, events};
 
 const SERVER_JAR: &[u8] = include_bytes!("../android/input-server.jar");
 const REMOTE_JAR: &str = "/data/local/tmp/encaje-input.jar";
@@ -85,27 +85,32 @@ const GRACE: Duration = Duration::from_secs(15);
 
 /// El monitor virtual y lo que cuelga de él.
 struct Monitor {
-    display: display::VirtualDisplay,
+    display: Box<dyn backend::VirtualDisplay>,
     capture: capture::Capture,
     size: (u32, u32),
-    keeper: monitors::Keeper,
 }
 
 impl Monitor {
-    async fn create(env: &display::Environment, size: (u32, u32)) -> Result<Self> {
-        let before = monitors::snapshot().await?;
-        let display = display::VirtualDisplay::create(env, size.0, size.1).await?;
+    async fn create(env: &backend::Environment, size: (u32, u32)) -> Result<Self> {
+        let display = backend::create(env, size.0, size.1).await?;
         // Hay que consumir el nodo de PipeWire para que el monitor exista. Con
         // el framerate variable de Mutter, y la ventana negra encima, casi no
         // llegan frames.
-        let capture = capture::spawn(display.node_id, size.0, size.1, 5, Arc::new(capture::FrameSlot::default()), false);
-        let keeper = monitors::keep(before);
-        events::set_monitor(keeper.placed.clone());
-        Ok(Self { display, capture, size, keeper })
+        let capture = capture::spawn(
+            display.node_id(),
+            size.0,
+            size.1,
+            5,
+            display.capture_follows_output(),
+            Arc::new(capture::FrameSlot::default()),
+            false,
+        );
+        events::set_monitor(display.placed());
+        Ok(Self { display, capture, size })
     }
 
     fn connector(&self) -> Option<String> {
-        self.keeper.placed.borrow().as_ref().map(|m| m.connector.clone())
+        self.display.placed().borrow().as_ref().map(|m| m.connector.clone())
     }
 }
 
@@ -113,11 +118,11 @@ enum End {
     Quit,
     /// Se fue la tablet (cable, reinicio de adb…).
     Lost,
-    /// Mutter cerró la sesión ("Dejar de compartir" en la barra superior).
+    /// El escritorio cerró el monitor (en GNOME, "Dejar de compartir").
     Closed,
 }
 
-pub async fn run(env: &display::Environment, fixed: Option<(u32, u32)>) -> Result<()> {
+pub async fn run(env: &backend::Environment, fixed: Option<(u32, u32)>) -> Result<()> {
     if Command::new("adb").arg("version").output().await.is_err() {
         bail!("adb no encontrado: instala android-tools");
     }
@@ -152,7 +157,6 @@ pub async fn run(env: &display::Environment, fixed: Option<(u32, u32)>) -> Resul
                     tracing::info!("la tablet no volvió: se quita el monitor virtual");
                     grab.detach();
                     m.display.stop().await;
-                    m.keeper.restore().await;
                     events::emit("waiting");
                 }
                 lost_at = None;
@@ -202,10 +206,9 @@ pub async fn run(env: &display::Environment, fixed: Option<(u32, u32)>) -> Resul
     grab.detach();
     if let Some(m) = monitor {
         m.display.stop().await;
-        m.keeper.restore().await;
     }
     match end {
-        End::Closed => bail!("GNOME cerró la sesión (se pulsó «Dejar de compartir»)"),
+        End::Closed => bail!("{}", backend::CLOSED_MESSAGE),
         _ => Ok(()),
     }
 }
@@ -213,7 +216,7 @@ pub async fn run(env: &display::Environment, fixed: Option<(u32, u32)>) -> Resul
 /// Una conexión con la tablet. Crea el monitor virtual si no existe (o le
 /// cambia el tamaño) y reenvía la entrada hasta que algo termine.
 async fn session(
-    env: &display::Environment,
+    env: &backend::Environment,
     fixed: Option<(u32, u32)>,
     port: u16,
     monitor: &mut Option<Monitor>,
@@ -241,7 +244,7 @@ async fn session(
     let size = fixed.unwrap_or_else(|| info.monitor_size());
     match monitor {
         Some(m) if m.size != size => {
-            m.capture.resize(size.0, size.1);
+            m.display.resize(size.0, size.1, &m.capture).await;
             m.size = size;
         }
         Some(_) => {}
@@ -254,7 +257,7 @@ async fn session(
         }
     }
     let m = monitor.as_mut().unwrap();
-    let mut placed = m.keeper.placed.clone();
+    let mut placed = m.display.placed();
     placed.mark_changed();
 
     // Eventos de la ventana que quedaran de antes de reconectar.
@@ -300,7 +303,7 @@ async fn session(
                     out.pointer.update(info);
                     if fixed.is_none() {
                         let (w, h) = info.monitor_size();
-                        m.capture.resize(w, h);
+                        m.display.resize(w, h, &m.capture).await;
                         m.size = (w, h);
                     }
                 }

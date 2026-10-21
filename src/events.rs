@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use tokio::sync::watch;
 
-use crate::monitors::VirtualMonitor;
+use crate::backend::VirtualMonitor;
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
 static MONITOR: Mutex<Option<watch::Receiver<Option<VirtualMonitor>>>> = Mutex::new(None);

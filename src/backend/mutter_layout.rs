@@ -1,4 +1,4 @@
-//! Disposición de monitores (org.gnome.Mutter.DisplayConfig).
+//! Disposición de monitores en GNOME (org.gnome.Mutter.DisplayConfig).
 //!
 //! Mutter da al monitor virtual un número de serie nuevo cada vez que se
 //! crea, así que nunca encuentra una configuración guardada para él y aplica
@@ -8,22 +8,21 @@
 //! * Antes de crear el monitor se guarda la configuración actual (`snapshot`).
 //! * Cuando aparece, se vuelve a aplicar esa configuración y se coloca el
 //!   monitor virtual donde lo dejaste la última vez (`keep`).
-//! * Si lo mueves en Configuración → Pantallas, la posición se guarda en
-//!   `~/.config/encaje/layout.json`, una por cada combinación de
-//!   monitores físicos (no es lo mismo el portátil solo que con el HDMI).
+//! * Si lo mueves en Configuración → Pantallas, la posición se guarda (ver
+//!   `layout.rs`).
 //! * Al quitar el monitor virtual Mutter vuelve a su disposición por defecto,
 //!   así que se repone la que tenías (`Keeper::restore`).
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
-use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 use zbus::zvariant::{OwnedValue, Value};
+
+use super::layout::{self, Offset, Rect, VirtualMonitor};
 
 type Props = HashMap<String, OwnedValue>;
 type MonitorId = (String, String, String, String);
@@ -53,34 +52,6 @@ trait DisplayConfig {
     fn monitors_changed(&self) -> zbus::Result<()>;
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Rect {
-    pub x: i32,
-    pub y: i32,
-    pub w: i32,
-    pub h: i32,
-}
-
-impl Rect {
-    fn right(&self) -> i32 {
-        self.x + self.w
-    }
-    fn bottom(&self) -> i32 {
-        self.y + self.h
-    }
-    fn overlaps(&self, o: &Rect) -> bool {
-        self.x < o.right() && o.x < self.right() && self.y < o.bottom() && o.y < self.bottom()
-    }
-    /// Longitud del borde que comparten (0 si no se tocan).
-    fn shared_edge(&self, o: &Rect) -> i32 {
-        let vertical = (self.right() == o.x || o.right() == self.x)
-            .then(|| self.bottom().min(o.bottom()) - self.y.max(o.y));
-        let horizontal = (self.bottom() == o.y || o.bottom() == self.y)
-            .then(|| self.right().min(o.right()) - self.x.max(o.x));
-        vertical.into_iter().chain(horizontal).max().unwrap_or(0).max(0)
-    }
-}
-
 /// Un monitor encendido, con todo lo necesario para volver a aplicarlo.
 #[derive(Clone, Debug)]
 struct Placed {
@@ -107,14 +78,7 @@ impl State {
 
     /// Clave de la combinación de monitores físicos encendidos.
     fn layout_key(&self) -> String {
-        let mut c: Vec<&str> = self
-            .placed
-            .iter()
-            .filter(|p| p.vendor != VIRTUAL_VENDOR)
-            .map(|p| p.connector.as_str())
-            .collect();
-        c.sort();
-        c.join("+")
+        layout::layout_key(self.placed.iter().filter(|p| p.vendor != VIRTUAL_VENDOR).map(|p| p.connector.as_str()))
     }
 }
 
@@ -162,107 +126,13 @@ async fn read(p: &DisplayConfigProxy<'_>) -> Result<State> {
     Ok(State { serial, placed, modes })
 }
 
-/// Monitor virtual y el borde de la pantalla física con la que se toca: es
-/// donde se dibuja la animación de conexión.
-#[derive(Clone, Debug, Serialize)]
-pub struct VirtualMonitor {
-    pub connector: String,
-    pub rect: Rect,
-    /// Pantalla física vecina, el lado de esa pantalla donde está la tablet
-    /// ("left", "right", "top", "bottom") y el tramo compartido.
-    pub neighbor: Option<(Rect, &'static str, i32, i32)>,
-}
-
 fn describe(state: &State, connector: &str) -> Option<VirtualMonitor> {
     let v = state.find(connector)?;
-    let neighbor = state
-        .placed
-        .iter()
-        .filter(|p| p.vendor != VIRTUAL_VENDOR)
-        .max_by_key(|p| p.rect.shared_edge(&v.rect))
-        .filter(|p| p.rect.shared_edge(&v.rect) > 0)
-        .map(|p| {
-            let (r, t) = (p.rect, v.rect);
-            if t.right() == r.x {
-                (r, "left", r.y.max(t.y), r.bottom().min(t.bottom()))
-            } else if t.x == r.right() {
-                (r, "right", r.y.max(t.y), r.bottom().min(t.bottom()))
-            } else if t.bottom() == r.y {
-                (r, "top", r.x.max(t.x), r.right().min(t.right()))
-            } else {
-                (r, "bottom", r.x.max(t.x), r.right().min(t.right()))
-            }
-        });
-    Some(VirtualMonitor { connector: connector.to_owned(), rect: v.rect, neighbor })
-}
-
-// ---- Posiciones guardadas ----
-
-/// Posición del monitor virtual relativa a la pantalla principal.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
-struct Offset {
-    dx: i32,
-    dy: i32,
-}
-
-fn layout_file() -> PathBuf {
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".config"));
-    base.join("encaje").join("layout.json")
-}
-
-fn load_offsets() -> HashMap<String, Offset> {
-    std::fs::read(layout_file())
-        .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok())
-        .unwrap_or_default()
-}
-
-fn save_offset(key: &str, offset: Offset) {
-    let mut all = load_offsets();
-    if all.get(key) == Some(&offset) {
-        return;
-    }
-    all.insert(key.to_owned(), offset);
-    let path = layout_file();
-    let _ = std::fs::create_dir_all(path.parent().unwrap());
-    match serde_json::to_vec_pretty(&all) {
-        Ok(ref json) if std::fs::write(&path, json).is_ok() => {
-            tracing::info!("posición de la tablet guardada ({key}: {}, {})", offset.dx, offset.dy)
-        }
-        _ => tracing::warn!("no se pudo guardar {}", path.display()),
-    }
+    let physical = state.placed.iter().filter(|p| p.vendor != VIRTUAL_VENDOR).map(|p| p.rect);
+    Some(VirtualMonitor::new(connector, v.rect, physical))
 }
 
 // ---- Colocación ----
-
-/// Busca la posición válida (pegada a algún monitor, sin solaparse) más
-/// cercana a `want`. Mutter rechaza disposiciones con huecos o solapes.
-fn snap(others: &[Rect], w: i32, h: i32, want: (i32, i32)) -> (i32, i32) {
-    let mut best = None;
-    for r in others {
-        let ys = (r.y - h + 1, r.bottom() - 1);
-        let xs = (r.x - w + 1, r.right() - 1);
-        let candidates = [
-            (r.right(), want.1.clamp(ys.0, ys.1)),
-            (r.x - w, want.1.clamp(ys.0, ys.1)),
-            (want.0.clamp(xs.0, xs.1), r.bottom()),
-            (want.0.clamp(xs.0, xs.1), r.y - h),
-        ];
-        for (x, y) in candidates {
-            let rect = Rect { x, y, w, h };
-            if others.iter().any(|o| o.overlaps(&rect)) {
-                continue;
-            }
-            let d = (x - want.0).pow(2) as i64 + (y - want.1).pow(2) as i64;
-            if best.is_none_or(|(bd, _)| d < bd) {
-                best = Some((d, (x, y)));
-            }
-        }
-    }
-    best.map(|(_, p)| p).unwrap_or(want)
-}
 
 /// La configuración de antes (con lo apagado apagado) más el monitor virtual
 /// en su sitio.
@@ -283,7 +153,7 @@ fn desired(before: &State, now: &State, virt: &Placed, offset: Option<Offset>) -
         Some(o) => (primary.x + o.dx, primary.y + o.dy),
         None => (rects.iter().map(Rect::right).max().unwrap_or(0), primary.y),
     };
-    let (x, y) = snap(&rects, virt.rect.w, virt.rect.h, want);
+    let (x, y) = layout::snap(&rects, virt.rect.w, virt.rect.h, want);
     out.push(Placed { rect: Rect { x, y, ..virt.rect }, scale: 1.0, transform: 0, primary: false, ..virt.clone() });
     normalize(&mut out);
     out
@@ -424,7 +294,7 @@ async fn keep_inner(mut before: State, tx: watch::Sender<Option<VirtualMonitor>>
             let resized = size != Some((v.rect.w, v.rect.h));
             if resized {
                 size = Some((v.rect.w, v.rect.h));
-                let layout = desired(&before, &now, &v, load_offsets().get(&key).copied());
+                let layout = desired(&before, &now, &v, layout::load_offsets().get(&key).copied());
                 if same_layout(&layout, &now.placed) {
                     applied = Some(layout);
                 } else {
@@ -459,11 +329,14 @@ async fn keep_inner(mut before: State, tx: watch::Sender<Option<VirtualMonitor>>
                 applied = Some(now.placed.clone());
             }
             if let Some(pr) = now.placed.iter().find(|m| m.primary && m.vendor != VIRTUAL_VENDOR) {
-                save_offset(&before.layout_key(), Offset { dx: v.rect.x - pr.rect.x, dy: v.rect.y - pr.rect.y });
+                layout::save_offset(&before.layout_key(), Offset { dx: v.rect.x - pr.rect.x, dy: v.rect.y - pr.rect.y });
             }
             let info = describe(&now, &virt);
             tx.send_if_modified(|cur| {
-                let changed = cur.as_ref().map(|c| (c.rect, c.neighbor)) != info.as_ref().map(|i| (i.rect, i.neighbor));
+                let changed = match (cur.as_ref(), info.as_ref()) {
+                    (Some(c), Some(i)) => !c.same_place(i),
+                    (c, i) => c.is_some() != i.is_some(),
+                };
                 if changed {
                     *cur = info;
                 }
@@ -525,22 +398,5 @@ mod tests {
         assert_eq!(get("DP-3"), None);
         assert_eq!(get("HDMI-1"), Some(Rect { x: 0, y: 0, w: 1920, h: 1080 }));
         assert_eq!(get("eDP-1"), Some(Rect { x: 0, y: 1080, w: 1920, h: 1080 }));
-    }
-
-    #[test]
-    fn invalid_saved_position_snaps_to_nearest_edge() {
-        let others = [Rect { x: 0, y: 0, w: 1920, h: 1080 }];
-        // Encima del monitor (solapado) → al borde más cercano.
-        assert_eq!(snap(&others, 1370, 858, (1800, 100)), (1920, 100));
-        // Lejos y con hueco → pegado.
-        assert_eq!(snap(&others, 1370, 858, (-2000, 50)), (-1370, 50));
-    }
-
-    #[test]
-    fn neighbor_side() {
-        let s = state(vec![placed("eDP-1", 1370, 1080, 1920, 1080, false), placed("Meta-0", 0, 1080, 1370, 858, false)]);
-        let v = describe(&s, "Meta-0").unwrap();
-        let (_, side, a, b) = v.neighbor.unwrap();
-        assert_eq!((side, a, b), ("left", 1080, 1938));
     }
 }

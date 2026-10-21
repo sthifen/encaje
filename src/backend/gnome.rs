@@ -1,6 +1,6 @@
-//! Detección del entorno gráfico y creación del monitor virtual.
+//! Monitor virtual en GNOME/Wayland.
 //!
-//! En GNOME/Wayland, Mutter expone por D-Bus las APIs privadas que usa
+//! Mutter expone por D-Bus las APIs privadas que usa
 //! gnome-remote-desktop:
 //!
 //! * `org.gnome.Mutter.RemoteDesktop`: sesión de control remoto (inyección de
@@ -11,18 +11,19 @@
 //!   consumidor de PipeWire (ver `capture.rs`).
 //!
 //! Ambas sesiones están ligadas a la conexión D-Bus: si el proceso muere,
-//! Mutter destruye el monitor virtual automáticamente.
+//! Mutter destruye el monitor virtual automáticamente. La disposición de
+//! pantallas la cuida `mutter_layout.rs`.
 
 use std::collections::HashMap;
+use std::sync::Mutex;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
+use async_trait::async_trait;
 use futures_util::StreamExt;
-use serde::Deserialize;
+use tokio::sync::watch;
 use zbus::zvariant::{OwnedObjectPath, Value};
 
-const BTN_LEFT: i32 = 0x110;
-const BTN_RIGHT: i32 = 0x111;
-const BTN_MIDDLE: i32 = 0x112;
+use super::{InputEvent, VirtualDisplay, VirtualMonitor, button_code, clamp01, mutter_layout};
 
 #[zbus::proxy(
     interface = "org.gnome.Mutter.RemoteDesktop",
@@ -79,66 +80,19 @@ trait ScreenCastStream {
     fn pipewire_stream_added(&self, node_id: u32) -> zbus::Result<()>;
 }
 
-/// Sesión gráfica detectada a partir de las variables de entorno.
-#[derive(Debug)]
-pub struct Environment {
-    pub session_type: String,
-    pub desktop: String,
-}
-
-impl Environment {
-    pub fn detect() -> Self {
-        let session_type = std::env::var("XDG_SESSION_TYPE").unwrap_or_else(|_| {
-            if std::env::var_os("WAYLAND_DISPLAY").is_some() {
-                "wayland".into()
-            } else if std::env::var_os("DISPLAY").is_some() {
-                "x11".into()
-            } else {
-                "tty".into()
-            }
-        });
-        let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
-        Self { session_type, desktop }
-    }
-
-    pub fn is_gnome_wayland(&self) -> bool {
-        self.session_type == "wayland" && self.desktop.to_uppercase().contains("GNOME")
-    }
-}
-
-/// Evento de entrada enviado por el visor (coordenadas normalizadas 0..1).
-#[derive(Debug, Deserialize)]
-#[serde(tag = "t", rename_all = "snake_case")]
-pub enum InputEvent {
-    Move { x: f64, y: f64 },
-    Button { b: u8, down: bool },
-    Wheel { dy: i32, #[serde(default)] dx: i32 },
-    TouchDown { id: u32, x: f64, y: f64 },
-    TouchMove { id: u32, x: f64, y: f64 },
-    TouchUp { id: u32 },
-    Key { keysym: u32, down: bool },
-}
-
-pub struct VirtualDisplay {
+pub struct GnomeDisplay {
     remote: RemoteDesktopSessionProxy<'static>,
     stream_path: String,
-    pub node_id: u32,
-    closed: tokio::sync::watch::Receiver<bool>,
+    node_id: u32,
+    closed: watch::Receiver<bool>,
+    keeper: Mutex<Option<mutter_layout::Keeper>>,
+    placed: watch::Receiver<Option<VirtualMonitor>>,
 }
 
-impl VirtualDisplay {
-    /// Crea el monitor virtual y devuelve el id del nodo PipeWire que lo emite.
-    pub async fn create(env: &Environment, width: u32, height: u32) -> Result<Self> {
-        if !env.is_gnome_wayland() {
-            bail!(
-                "Sesión detectada: {} / {:?}. El monitor virtual se crea con la API \
-                 RecordVirtual de Mutter, que sólo existe en GNOME sobre Wayland.\n\
-                 En X11 haría falta un conector falso (driver dummy o evdi + xrandr), \
-                 lo cual no está implementado.",
-                env.session_type,
-                env.desktop
-            );
-        }
+impl GnomeDisplay {
+    pub async fn create(width: u32, height: u32) -> Result<Self> {
+        // Antes de crear el monitor: Mutter rehace la disposición al añadirlo.
+        let before = mutter_layout::snapshot().await?;
 
         let conn = zbus::Connection::session()
             .await
@@ -185,7 +139,7 @@ impl VirtualDisplay {
         // Mutter cierra la sesión si pulsas "Dejar de compartir" en la barra
         // superior. Hay que suscribirse a las señales antes de arrancarla.
         let mut closed_signal = remote.receive_closed().await?;
-        let (closed_tx, closed) = tokio::sync::watch::channel(false);
+        let (closed_tx, closed) = watch::channel(false);
         tokio::spawn(async move {
             closed_signal.next().await;
             let _ = closed_tx.send(true);
@@ -199,26 +153,42 @@ impl VirtualDisplay {
         let node_id = signal.args()?.node_id;
 
         tracing::info!(node_id, %stream_path, "monitor virtual creado ({width}x{height})");
+        let keeper = mutter_layout::keep(before);
         Ok(Self {
             remote,
             stream_path: stream_path.to_string(),
             node_id,
             closed,
+            placed: keeper.placed.clone(),
+            keeper: Mutex::new(Some(keeper)),
         })
     }
+}
 
-    /// Termina cuando Mutter cierra la sesión por su cuenta.
-    pub async fn closed(&self) {
+#[async_trait]
+impl VirtualDisplay for GnomeDisplay {
+    fn node_id(&self) -> u32 {
+        self.node_id
+    }
+
+    fn placed(&self) -> watch::Receiver<Option<VirtualMonitor>> {
+        self.placed.clone()
+    }
+
+    async fn closed(&self) {
         let mut rx = self.closed.clone();
         let _ = rx.wait_for(|c| *c).await;
     }
 
-    pub async fn stop(&self) {
+    async fn stop(&self) {
         let _ = self.remote.stop().await;
+        let keeper = self.keeper.lock().unwrap().take();
+        if let Some(k) = keeper {
+            k.restore().await;
+        }
     }
 
-    /// `size`: tamaño actual del monitor virtual (las coordenadas llegan 0..1).
-    pub async fn inject(&self, ev: InputEvent, size: (u32, u32)) -> Result<()> {
+    async fn inject(&self, ev: InputEvent, size: (u32, u32)) -> Result<()> {
         let (w, h) = (size.0 as f64, size.1 as f64);
         let s = self.stream_path.as_str();
         match ev {
@@ -228,12 +198,7 @@ impl VirtualDisplay {
                     .await?
             }
             InputEvent::Button { b, down } => {
-                let code = match b {
-                    1 => BTN_MIDDLE,
-                    2 => BTN_RIGHT,
-                    _ => BTN_LEFT,
-                };
-                self.remote.notify_pointer_button(code, down).await?
+                self.remote.notify_pointer_button(button_code(b) as i32, down).await?
             }
             InputEvent::Wheel { dy, dx } => {
                 if dy != 0 {
@@ -260,8 +225,4 @@ impl VirtualDisplay {
         }
         Ok(())
     }
-}
-
-fn clamp01(v: f64) -> f64 {
-    v.clamp(0.0, 1.0)
 }

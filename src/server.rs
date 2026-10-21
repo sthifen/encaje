@@ -23,7 +23,7 @@ use tokio::sync::{broadcast, mpsc};
 use webrtc::peer_connection::RTCSessionDescription;
 
 use crate::capture::Capture;
-use crate::display::InputEvent;
+use crate::backend::{InputEvent, VirtualDisplay};
 use crate::encoder::{BitrateControl, ClientRate, EncodedFrame, KeyframeRequest};
 
 const INDEX_HTML: &str = include_str!("../web/index.html");
@@ -35,6 +35,7 @@ pub struct AppState {
     pub rate: Arc<BitrateControl>,
     pub input: mpsc::UnboundedSender<InputEvent>,
     pub capture: Capture,
+    pub display: Arc<dyn VirtualDisplay>,
     /// La resolución sigue a los visores (si no se fijó con --width/--height).
     pub auto_size: bool,
     pub fps: u32,
@@ -351,7 +352,8 @@ fn request_size(s: &AppState, w: u32, h: u32) {
     let even = |v: f64| ((v as u32).clamp(MIN_SIDE, MAX_SIDE)) & !1;
     let (w, h) = (even(w as f64 * k), even(h as f64 * k));
     if s.capture.geometry.get() != (w, h) {
-        s.capture.resize(w, h);
+        let (display, capture) = (s.display.clone(), s.capture.clone());
+        tokio::spawn(async move { display.resize(w, h, &capture).await });
     }
 }
 

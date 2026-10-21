@@ -6,7 +6,7 @@
 
 <p align="center">
   <strong>Tu tablet Android como segundo monitor de tu PC con Linux.</strong><br />
-  O úsala con el ratón, el teclado y el portapapeles del PC. Para GNOME / Wayland,
+  O úsala con el ratón, el teclado y el portapapeles del PC. Para GNOME y KDE Plasma (Wayland),
   por cable USB o por WiFi, sin root.
 </p>
 
@@ -36,12 +36,24 @@
 ## Cómo funciona
 
 ```
-Mutter RecordVirtual ──► PipeWire ──► H.264 (NVENC / VA-API / OpenH264)
-   (monitor virtual)       (BGRx)            │
-                                             ├─► WebSocket + WebCodecs ── USB (adb reverse)
-                                             └─► WebRTC ───────────────── WiFi / LAN
-Visor ──(táctil, ratón, teclado)──► WebSocket ──► Mutter RemoteDesktop
+Monitor virtual ──► PipeWire ──► H.264 (NVENC / VA-API / OpenH264)
+ (GNOME o KDE)        (BGRx)            │
+                                        ├─► WebSocket + WebCodecs ── USB (adb reverse)
+                                        └─► WebRTC ───────────────── WiFi / LAN
+Visor ──(táctil, ratón, teclado)──► WebSocket ──► entrada del escritorio
 ```
+
+Lo único que cambia entre escritorios está en [`src/backend/`](src/backend):
+
+| Escritorio | Monitor virtual | Entrada | Disposición de pantallas |
+|---|---|---|---|
+| GNOME | `RecordVirtual` de Mutter (D-Bus) | `org.gnome.Mutter.RemoteDesktop` | Encaje la guarda y la repone |
+| KDE Plasma 6 | `zkde_screencast_unstable_v1` de KWin (Wayland) | `org_kde_kwin_fake_input` | KWin la recuerda sola |
+
+En KDE, KWin sólo da esos protocolos a programas con un acceso directo que
+los pida (como krfb); Encaje lo crea al arrancar en
+`~/.local/share/applications/dev.encaje.kwin.desktop`. El tamaño del
+monitor se cambia con `kscreen-doctor`, que viene con Plasma.
 
 ## Instalación (sin compilar)
 
@@ -64,7 +76,8 @@ directamente, con su registro a la vista. Opciones por defecto (ver
 --fps 60 --bitrate 20000
 ```
 
-Requisitos: GNOME sobre Wayland con PipeWire y GStreamer (vienen de serie).
+Requisitos: GNOME o KDE Plasma 6 sobre Wayland, con PipeWire y GStreamer
+(vienen de serie).
 Para codificar con la GPU NVIDIA hace falta el plugin `nvcodec` de
 `gstreamer1-plugins-bad`; si no está, se usa la CPU.
 
@@ -113,7 +126,7 @@ En la app, escribe la IP del PC en el recuadro *WiFi*, o abre
 ### Sólo ratón y teclado (`--input-only`)
 
 La tablet sigue mostrando **su propio Android** y no se transmite nada de
-pantalla: el monitor virtual sólo sirve para que GNOME sepa dónde está.
+pantalla: el monitor virtual sólo sirve para que el escritorio sepa dónde está.
 Al mover el ratón hacia él, aparece el puntero de Android en la tablet;
 al volver, el ratón regresa al PC. Como Barrier o Deskflow, pero sin
 instalar nada en la tablet.
@@ -202,7 +215,11 @@ OpenH264 sólo es razonable hasta ~1280×720.
 
 | Ruta | |
 |---|---|
-| `src/display.rs` | Detección del entorno, monitor virtual y entrada (D-Bus a Mutter). |
+| `src/backend/mod.rs` | Detección del escritorio e interfaz común `VirtualDisplay`. |
+| `src/backend/gnome.rs` | GNOME: monitor virtual y entrada (D-Bus a Mutter). |
+| `src/backend/mutter_layout.rs` | GNOME: disposición de monitores (`DisplayConfig`). |
+| `src/backend/kde.rs` | KDE Plasma: monitor virtual y entrada (protocolos Wayland de KWin). |
+| `src/backend/layout.rs` | Común: pantalla vecina y posición guardada de la tablet. |
 | `src/capture.rs` | Consumidor PipeWire; deja sólo el frame más reciente. |
 | `src/encoder.rs` | Backends H.264, keyframes bajo demanda, estadísticas. |
 | `src/server.rs` | HTTP (axum): visor, `/offer` WebRTC, `/ws/video`, `/ws/input`. |
@@ -217,8 +234,10 @@ OpenH264 sólo es razonable hasta ~1280×720.
 
 ## Limitaciones
 
-- Sólo GNOME sobre Wayland: `RecordVirtual` es una API de Mutter. En X11,
-  KDE o wlroots haría falta otro mecanismo (evdi, `krfb-virtualmonitor`, …).
+- Sólo GNOME y KDE Plasma sobre Wayland. Para Hyprland/Sway (wlroots) o
+  X11 (Cinnamon, XFCE) haría falta otro backend en `src/backend/`.
+- KDE: probado con un KWin 6.7 de prueba (sin pantalla), aún no en una
+  sesión de Plasma con la tablet.
 - Sin audio.
 - WebRTC no reacciona a los PLI del navegador; se recupera con el IDR
   periódico (cada 2 s).

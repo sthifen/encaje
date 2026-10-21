@@ -1,22 +1,21 @@
-//! Encaje: monitor virtual para GNOME/Wayland transmitido a un
-//! navegador o a la app Android, por WiFi (WebRTC) o por cable USB (ADB).
+//! Encaje: monitor virtual para GNOME y KDE Plasma (Wayland) transmitido a
+//! un navegador o a la app Android, por WiFi (WebRTC) o por cable USB (ADB).
 //!
-//! Flujo: Mutter (monitor virtual) → PipeWire → H.264 (NVENC/VA-API/OpenH264) →
+//! Flujo: compositor (monitor virtual, ver `backend`) → PipeWire → H.264 (NVENC/VA-API/OpenH264) →
 //! broadcast → { WebRTC | WebSocket+WebCodecs } → visor.
 //!
 //! Con `--input-only` no se transmite nada: la tablet sigue con su Android y
 //! recibe el ratón y el teclado del PC (ver `input_only.rs`).
 
 mod adb;
+mod backend;
 mod capture;
 mod clipboard;
-mod display;
 mod encoder;
 mod events;
 mod grab_window;
 mod gui;
 mod input_only;
-mod monitors;
 mod overlay;
 mod rtc_peer;
 mod server;
@@ -29,7 +28,7 @@ use clap::Parser;
 use tokio::sync::{broadcast, mpsc};
 
 #[derive(Parser)]
-#[command(version, about = "Encaje: la tablet como segundo monitor o con el ratón y el teclado del PC (GNOME/Wayland)")]
+#[command(version, about = "Encaje: la tablet como segundo monitor o con el ratón y el teclado del PC (GNOME o KDE Plasma, Wayland)")]
 struct Args {
     /// Ancho fijo del monitor virtual. Sin --width/--height la resolución
     /// se adapta a la pantalla de cada visor (y a su escala de rendimiento).
@@ -114,7 +113,7 @@ async fn serve(args: Args) -> Result<()> {
     let (width, height) = fixed.unwrap_or((1920, 1080));
 
     if args.input_only {
-        let env = display::Environment::detect();
+        let env = backend::Environment::detect();
         return input_only::run(&env, fixed).await;
     }
 
@@ -124,17 +123,15 @@ async fn serve(args: Args) -> Result<()> {
         .await
         .with_context(|| format!("no se pudo escuchar en {addr}"))?;
 
-    let env = display::Environment::detect();
+    let env = backend::Environment::detect();
     tracing::info!("sesión: {} / escritorio: {}", env.session_type, env.desktop);
 
-    let before = monitors::snapshot().await?;
-    let display = Arc::new(display::VirtualDisplay::create(&env, width, height).await?);
-    let keeper = monitors::keep(before);
-    events::set_monitor(keeper.placed.clone());
+    let display: Arc<dyn backend::VirtualDisplay> = backend::create(&env, width, height).await?.into();
+    events::set_monitor(display.placed());
 
     // Captura → codificador (hilos nativos) → broadcast a clientes (tokio).
     let slot = Arc::new(capture::FrameSlot::default());
-    let capture = capture::spawn(display.node_id, width, height, args.fps, slot.clone(), true);
+    let capture = capture::spawn(display.node_id(), width, height, args.fps, display.capture_follows_output(), slot.clone(), true);
     let (frames_tx, _) = broadcast::channel(8);
     let keyreq = encoder::KeyframeRequest::default();
     let rate = encoder::BitrateControl::new(args.bitrate);
@@ -172,6 +169,7 @@ async fn serve(args: Args) -> Result<()> {
         rate,
         input: input_tx,
         capture,
+        display: display.clone(),
         auto_size: fixed.is_none(),
         fps: args.fps,
     };
@@ -186,9 +184,8 @@ async fn serve(args: Args) -> Result<()> {
         _ = display.closed() => Ok(true),
     };
     display.stop().await;
-    keeper.restore().await;
     if closed? {
-        anyhow::bail!("GNOME cerró la sesión (se pulsó «Dejar de compartir»)");
+        anyhow::bail!("{}", backend::CLOSED_MESSAGE);
     }
     Ok(())
 }
