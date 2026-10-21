@@ -93,8 +93,9 @@ const INTERFACES: &str = "zkde_screencast_unstable_v1,org_kde_kwin_fake_input";
 
 /// Escribe (o actualiza) el `.desktop` oculto que da permiso a este
 /// ejecutable para usar los protocolos restringidos, y refresca la base de
-/// datos de aplicaciones de KDE (ksycoca), que es donde mira KWin.
-fn register_desktop_file() -> Result<()> {
+/// datos de aplicaciones de KDE (ksycoca), que es donde mira KWin. Devuelve
+/// si hubo que cambiarlo.
+fn register_desktop_file() -> Result<bool> {
     let exe = std::env::current_exe()?.canonicalize()?;
     let dir = std::env::var_os("XDG_DATA_HOME")
         .map(std::path::PathBuf::from)
@@ -108,7 +109,7 @@ fn register_desktop_file() -> Result<()> {
         exe.display()
     );
     if std::fs::read_to_string(&path).is_ok_and(|c| c == content) {
-        return Ok(());
+        return Ok(false);
     }
     std::fs::create_dir_all(&dir)?;
     std::fs::write(&path, content)?;
@@ -120,7 +121,7 @@ fn register_desktop_file() -> Result<()> {
     if !rebuilt.is_ok_and(|s| s.success()) {
         tracing::warn!("no se pudo ejecutar kbuildsycoca6; KWin puede tardar en ver los permisos");
     }
-    Ok(())
+    Ok(true)
 }
 
 #[derive(Default)]
@@ -284,6 +285,9 @@ async fn modes(connector: &str, width: u32, height: u32) -> Result<((u64, u64), 
 
 /// Pone el monitor virtual a `width`x`height`, añadiendo el modo si no existe.
 async fn set_mode(connector: &str, width: u32, height: u32) -> Result<()> {
+    // KWin calcula los modos nuevos con CVT, que deja el ancho en múltiplo
+    // de 8 (pedir 1398x876 crea 1392x876): se pide ya redondeado.
+    let width = width & !7;
     let (current, id) = modes(connector, width, height).await?;
     if current == (width as u64, height as u64) {
         return Ok(());
@@ -314,20 +318,30 @@ pub struct KdeDisplay {
 
 impl KdeDisplay {
     pub async fn create(width: u32, height: u32) -> Result<Self> {
-        if let Err(e) = register_desktop_file() {
+        let registered = register_desktop_file().unwrap_or_else(|e| {
             tracing::warn!("no se pudo registrar el acceso directo para KWin: {e:#}");
-        }
-        let conn = Connection::connect_to_env().context("no se pudo conectar con KWin (WAYLAND_DISPLAY)")?;
-        let (globals, mut queue) = registry_queue_init::<State>(&conn).context("registro Wayland")?;
+            false
+        });
+        // Con un `.desktop` recién escrito (en el AppImage, en cada arranque)
+        // KWin tarda un momento en ver los permisos: se reintenta la conexión.
+        let mut attempts = if registered { 10 } else { 1 };
+        let (conn, globals, mut queue, screencast) = loop {
+            attempts -= 1;
+            let conn = Connection::connect_to_env().context("no se pudo conectar con KWin (WAYLAND_DISPLAY)")?;
+            let (globals, queue) = registry_queue_init::<State>(&conn).context("registro Wayland")?;
+            if let Ok(sc) = globals.bind::<ZkdeScreencastUnstableV1, _, _>(&queue.handle(), 2..=6, ()) {
+                break (conn, globals, queue, sc);
+            }
+            if attempts == 0 {
+                bail!(
+                    "KWin no da acceso a zkde_screencast_unstable_v1. Hace falta Plasma 5.26 o \
+                     posterior; si lo es, cierra y vuelve a abrir la sesión para que KWin vea \
+                     ~/.local/share/applications/dev.encaje.kwin.desktop"
+                );
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        };
         let qh = queue.handle();
-
-        let screencast: ZkdeScreencastUnstableV1 = globals.bind(&qh, 2..=6, ()).map_err(|_| {
-            anyhow!(
-                "KWin no da acceso a zkde_screencast_unstable_v1. Hace falta Plasma 5.26 o \
-                 posterior; si lo es, cierra y vuelve a abrir la sesión para que KWin vea \
-                 ~/.local/share/applications/dev.encaje.kwin.desktop"
-            )
-        })?;
         let fake: OrgKdeKwinFakeInput = globals
             .bind(&qh, 4..=6, ())
             .map_err(|_| anyhow!("KWin no ofrece org_kde_kwin_fake_input (entrada remota)"))?;
