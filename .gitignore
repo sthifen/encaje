@@ -5,3 +5,4 @@
 /android/debug.keystore
 /android/*.idsig
 /dist
+/promo/out/*.mp4

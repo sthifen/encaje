@@ -1,5 +1,7 @@
 # Encaje
 
+![Encaje: tu tablet como segundo monitor](promo/out/encaje-demo.gif)
+
 Monitor virtual para **GNOME / Wayland** que se transmite a un móvil Android
 (app nativa) o a cualquier navegador, por **cable USB** o por **WiFi**, con
 entrada táctil y de ratón de vuelta al PC.
@@ -193,3 +195,10 @@ OpenH264 sólo es razonable hasta ~1280×720.
   periódico (cada 2 s).
 - El backend VA-API no se ha probado (en este equipo el driver de Intel no
   codifica H.264).
+
+## Material promocional
+
+Imágenes para redes (banner, posts, historias) y video en
+[`promo/out/`](promo/out); los videos MP4 están en las
+[releases](../../releases/latest). Se regeneran con `python3 promo/gen.py`
+(necesita ImageMagick con librsvg y ffmpeg).
