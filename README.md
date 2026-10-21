@@ -1,10 +1,39 @@
-# Encaje
+<p align="center">
+  <img src="packaging/encaje.svg" width="112" height="112" alt="Encaje" />
+</p>
 
-![Encaje: tu tablet como segundo monitor](promo/out/encaje-demo.gif)
+<h1 align="center">Encaje</h1>
 
-Monitor virtual para **GNOME / Wayland** que se transmite a un móvil Android
-(app nativa) o a cualquier navegador, por **cable USB** o por **WiFi**, con
-entrada táctil y de ratón de vuelta al PC.
+<p align="center">
+  <strong>Tu tablet Android como segundo monitor de tu PC con Linux.</strong><br />
+  O úsala con el ratón, el teclado y el portapapeles del PC. Para GNOME / Wayland,
+  por cable USB o por WiFi, sin root.
+</p>
+
+<div align="center">
+
+[![Descargar para Linux][badge-linux]][linux-appimage]
+[![Descargar para Android][badge-android]][android-apk]
+
+</div>
+
+<p align="center">
+  <a href="https://github.com/sthifen/encaje/releases/latest"><img src="https://img.shields.io/github/v/release/sthifen/encaje?label=versi%C3%B3n&color=4F8CFF" alt="Última versión" /></a>
+  <a href="https://github.com/sthifen/encaje/releases"><img src="https://img.shields.io/github/downloads/sthifen/encaje/total?label=descargas&color=1E3A8A" alt="Descargas" /></a>
+  <a href="https://github.com/sthifen/encaje/stargazers"><img src="https://img.shields.io/github/stars/sthifen/encaje?style=flat&label=estrellas&color=A78BFA" alt="Estrellas" /></a>
+</p>
+
+![Encaje: una ventana pasa del portátil a la tablet; después el ratón cruza al Android y se comparte el portapapeles](promo/out/encaje-demo.gif)
+
+<p align="center">
+  <a href="#instalación-sin-compilar">Instalación</a> ·
+  <a href="#móvil-por-usb-como-spacedesk">Por USB</a> ·
+  <a href="#móvil-o-tablet-por-wifi">Por WiFi</a> ·
+  <a href="#sólo-ratón-y-teclado---input-only">Ratón y teclado</a> ·
+  <a href="https://github.com/sthifen/encaje/releases/latest">Todas las descargas</a>
+</p>
+
+## Cómo funciona
 
 ```
 Mutter RecordVirtual ──► PipeWire ──► H.264 (NVENC / VA-API / OpenH264)
@@ -18,8 +47,8 @@ Visor ──(táctil, ratón, teclado)──► WebSocket ──► Mutter Remot
 
 Descarga de la [última release](../../releases/latest):
 
-- **`Encaje-*-x86_64.AppImage`**: un solo archivo.
-  `chmod +x Encaje-*.AppImage` y ábrelo con doble clic.
+- **`Encaje-x86_64.AppImage`**: un solo archivo.
+  `chmod +x Encaje-x86_64.AppImage` y ábrelo con doble clic.
 - **`encaje-*-x86_64.tar.gz`**: binario + acceso directo del menú.
   Descomprime y ejecuta `./install.sh` (instala en `~/.local`, sin sudo;
   `./install.sh --uninstall` lo quita).
@@ -202,3 +231,8 @@ Imágenes para redes (banner, posts, historias) y video en
 [`promo/out/`](promo/out); los videos MP4 están en las
 [releases](../../releases/latest). Se regeneran con `python3 promo/gen.py`
 (necesita ImageMagick con librsvg y ffmpeg).
+
+[badge-linux]: https://img.shields.io/badge/Linux-AppImage-1E3A8A?style=for-the-badge&logo=linux&logoColor=white
+[badge-android]: https://img.shields.io/badge/Android-APK-3DDC84?style=for-the-badge&logo=android&logoColor=white
+[linux-appimage]: https://github.com/sthifen/encaje/releases/latest/download/Encaje-x86_64.AppImage
+[android-apk]: https://github.com/sthifen/encaje/releases/latest/download/encaje.apk

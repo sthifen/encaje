@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Genera los paquetes para Linux en dist/:
 #   encaje-<ver>-x86_64.tar.gz            binario + acceso directo + install.sh
-#   Encaje-<ver>-x86_64.AppImage  todo en un archivo ejecutable
+#   Encaje-x86_64.AppImage        todo en un archivo ejecutable (nombre fijo, para
+#                                 enlazar releases/latest/download/ desde el README)
 #
 # El binario enlaza dinámicamente con PipeWire y GStreamer del sistema (no se
 # empaquetan: deben coincidir con los del escritorio). Requisitos en destino:
@@ -50,7 +51,7 @@ if [[ ! -x "$TOOL" ]]; then
   chmod +x "$TOOL"
 fi
 APPIMAGE_EXTRACT_AND_RUN=1 ARCH=$ARCH "$TOOL" --no-appstream "$APPDIR" \
-  "$DIST/Encaje-$VERSION-$ARCH.AppImage" >/dev/null
+  "$DIST/Encaje-$ARCH.AppImage" >/dev/null
 rm -rf "$APPDIR" "$BIN"
 
 echo "✓ dist/:"
