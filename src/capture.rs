@@ -199,7 +199,7 @@ fn run(
                 quit.quit();
             }
         })
-        .param_changed(|_, state, id, param| {
+        .param_changed(|stream, state, id, param| {
             let Some(param) = param else { return };
             if id != pw::spa::param::ParamType::Format.as_raw() {
                 return;
@@ -216,6 +216,11 @@ fn run(
                     state.format.framerate().denom
                 );
             }
+            if let Ok(buf_bytes) = buffers_param_pod()
+                && let Some(pod) = Pod::from_bytes(&buf_bytes)
+            {
+                let _ = stream.update_params(&mut [pod]);
+            }
         })
         .process(|stream, state| {
             let Some(mut buffer) = stream.dequeue_buffer() else { return };
@@ -228,26 +233,30 @@ fn run(
             if size == 0 {
                 return; // búfer sin contenido (frame no modificado / sólo metadatos)
             }
-            let Some(bytes) = d.data() else { return };
             let s = state.format.size();
             let (w, h) = (s.width as usize & !1, s.height as usize & !1);
             let stride = if stride > 0 { stride as usize } else { s.width as usize * 4 };
-            let end = (offset + size).min(bytes.len());
-            if w == 0 || h == 0 || end < offset + stride * (h - 1) + w * 4 {
+            if w == 0 || h == 0 {
                 return;
             }
             let Some(order) = channel_order(state.format.format()) else { return };
+            let needed = offset + stride * (h - 1) + w * 4;
             let captured = Instant::now();
-            let src = &bytes[offset..end];
-            let row = w * 4;
-            let data = if stride == row {
-                src[..row * h].to_vec()
-            } else {
-                let mut v = Vec::with_capacity(row * h);
-                for y in 0..h {
-                    v.extend_from_slice(&src[y * stride..y * stride + row]);
+            let data = if let Some(bytes) = d.data() {
+                let end = (offset + size).min(bytes.len());
+                if end < needed {
+                    return;
                 }
+                copy_frame(&bytes[offset..end], w, h, stride)
+            } else if d.fd() >= 0 {
+                let map_len = (offset + size).max(needed);
+                let is_dmabuf = d.type_() == spa::buffer::DataType::DmaBuf;
+                let Some(v) = copy_fd_frame(d.fd() as i32, map_len, offset, w, h, stride, is_dmabuf) else {
+                    return;
+                };
                 v
+            } else {
+                return;
             };
             CAPTURED.fetch_add(1, Ordering::Relaxed);
             COPY_US.fetch_add(captured.elapsed().as_micros() as u64, Ordering::Relaxed);
@@ -255,22 +264,29 @@ fn run(
         })
         .register()?;
 
-    let format = video_format_pod(width, height, fps, follow)?;
-    let mut params = [Pod::from_bytes(&format).ok_or_else(|| anyhow!("pod inválido"))?];
+    let format_dmabuf = video_format_pod(width, height, fps, follow, true)?;
+    let format_shm = video_format_pod(width, height, fps, follow, false)?;
+    let mut params = [
+        Pod::from_bytes(&format_dmabuf).ok_or_else(|| anyhow!("pod dmabuf inválido"))?,
+        Pod::from_bytes(&format_shm).ok_or_else(|| anyhow!("pod shm inválido"))?,
+    ];
     stream.connect(
         spa::utils::Direction::Input,
         Some(node_id),
-        pw::stream::StreamFlags::AUTOCONNECT | pw::stream::StreamFlags::MAP_BUFFERS,
+        pw::stream::StreamFlags::AUTOCONNECT,
         &mut params,
     )?;
 
     let resizer = stream.clone();
     let _resize = resize_rx.attach(mainloop.loop_(), move |(w, h)| {
         tracing::info!("cambiando el monitor virtual a {w}x{h}");
-        let r = video_format_pod(w, h, fps, follow).map_err(|e| e.to_string()).and_then(|bytes| {
-            let pod = Pod::from_bytes(&bytes).ok_or("pod inválido")?;
-            resizer.update_params(&mut [pod]).map_err(|e| e.to_string())
-        });
+        let r = (|| -> Result<(), String> {
+            let b_dma = video_format_pod(w, h, fps, follow, true).map_err(|e| e.to_string())?;
+            let b_shm = video_format_pod(w, h, fps, follow, false).map_err(|e| e.to_string())?;
+            let p1 = Pod::from_bytes(&b_dma).ok_or("pod inválido")?;
+            let p2 = Pod::from_bytes(&b_shm).ok_or("pod inválido")?;
+            resizer.update_params(&mut [p1, p2]).map_err(|e| e.to_string())
+        })();
         if let Err(e) = r {
             tracing::warn!("no se pudo cambiar la resolución: {e}");
         }
@@ -280,58 +296,183 @@ fn run(
     Ok(())
 }
 
-/// EnumFormat: vídeo crudo de 32 bits. Con tamaño fijo Mutter lo usa como
-/// resolución del monitor virtual; con `follow` se acepta cualquiera.
-fn video_format_pod(width: u32, height: u32, fps: u32, follow: bool) -> Result<Vec<u8>> {
-    use pw::spa::param::format::{FormatProperties, MediaSubtype, MediaType};
-    use pw::spa::utils::Rectangle;
-    let size = if follow {
-        pw::spa::pod::property!(
-            FormatProperties::VideoSize,
-            Choice,
-            Range,
-            Rectangle,
-            Rectangle { width, height },
-            Rectangle { width: 1, height: 1 },
-            Rectangle { width: 8192, height: 8192 }
-        )
+fn copy_frame(src: &[u8], w: usize, h: usize, stride: usize) -> Vec<u8> {
+    let row = w * 4;
+    if stride == row {
+        src[..row * h].to_vec()
     } else {
-        pw::spa::pod::property!(FormatProperties::VideoSize, Rectangle, Rectangle { width, height })
-    };
+        let mut v = Vec::with_capacity(row * h);
+        for y in 0..h {
+            v.extend_from_slice(&src[y * stride..y * stride + row]);
+        }
+        v
+    }
+}
+
+#[repr(C)]
+struct DmaBufSync {
+    flags: u64,
+}
+
+const DMA_BUF_SYNC_READ: u64 = 1 << 0;
+const DMA_BUF_SYNC_START: u64 = 0 << 2;
+const DMA_BUF_SYNC_END: u64 = 1 << 2;
+const DMA_BUF_IOCTL_SYNC: libc::c_ulong = 0x40086200;
+
+fn copy_fd_frame(
+    fd: i32,
+    map_len: usize,
+    offset: usize,
+    w: usize,
+    h: usize,
+    stride: usize,
+    is_dmabuf: bool,
+) -> Option<Vec<u8>> {
+    if fd < 0 || map_len == 0 {
+        return None;
+    }
+    unsafe {
+        if is_dmabuf {
+            let sync = DmaBufSync { flags: DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ };
+            let _ = libc::ioctl(fd, DMA_BUF_IOCTL_SYNC, &sync);
+        }
+        let ptr = libc::mmap(
+            std::ptr::null_mut(),
+            map_len,
+            libc::PROT_READ,
+            libc::MAP_SHARED,
+            fd,
+            0,
+        );
+        if ptr == libc::MAP_FAILED {
+            if is_dmabuf {
+                let sync = DmaBufSync { flags: DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ };
+                let _ = libc::ioctl(fd, DMA_BUF_IOCTL_SYNC, &sync);
+            }
+            return None;
+        }
+        let slice = std::slice::from_raw_parts(ptr as *const u8, map_len);
+        let out = copy_frame(&slice[offset..], w, h, stride);
+        libc::munmap(ptr, map_len);
+        if is_dmabuf {
+            let sync = DmaBufSync { flags: DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ };
+            let _ = libc::ioctl(fd, DMA_BUF_IOCTL_SYNC, &sync);
+        }
+        Some(out)
+    }
+}
+
+fn buffers_param_pod() -> Result<Vec<u8>> {
+    use pw::spa::buffer::DataType;
+    use pw::spa::pod::{ChoiceValue, Property};
+    use pw::spa::utils::{Choice, ChoiceEnum, ChoiceFlags};
+    let mask = (1 << DataType::MemFd.as_raw())
+        | (1 << DataType::MemPtr.as_raw())
+        | (1 << DataType::DmaBuf.as_raw());
     let obj = pw::spa::pod::object!(
-        pw::spa::utils::SpaTypes::ObjectParamFormat,
-        pw::spa::param::ParamType::EnumFormat,
-        pw::spa::pod::property!(FormatProperties::MediaType, Id, MediaType::Video),
-        pw::spa::pod::property!(FormatProperties::MediaSubtype, Id, MediaSubtype::Raw),
-        pw::spa::pod::property!(
-            FormatProperties::VideoFormat,
-            Choice,
-            Enum,
-            Id,
-            VideoFormat::BGRx,
-            VideoFormat::BGRx,
-            VideoFormat::BGRA,
-            VideoFormat::RGBx,
-            VideoFormat::RGBA,
-        ),
-        size,
-        // Como gnome-remote-desktop: frames a ritmo variable (sólo cuando hay
-        // cambios) con un máximo explícito.
-        pw::spa::pod::property!(
-            FormatProperties::VideoFramerate,
-            Fraction,
-            pw::spa::utils::Fraction { num: 0, denom: 1 }
-        ),
-        pw::spa::pod::property!(
-            FormatProperties::VideoMaxFramerate,
-            Choice,
-            Range,
-            Fraction,
-            pw::spa::utils::Fraction { num: fps, denom: 1 },
-            pw::spa::utils::Fraction { num: 1, denom: 1 },
-            pw::spa::utils::Fraction { num: fps, denom: 1 }
+        pw::spa::utils::SpaTypes::ObjectParamBuffers,
+        pw::spa::param::ParamType::Buffers,
+        Property::new(
+            pw::spa::sys::SPA_PARAM_BUFFERS_dataType,
+            pw::spa::pod::Value::Choice(ChoiceValue::Int(Choice(
+                ChoiceFlags::empty(),
+                ChoiceEnum::Flags {
+                    default: mask,
+                    flags: vec![mask],
+                },
+            ))),
         ),
     );
+    Ok(pw::spa::pod::serialize::PodSerializer::serialize(
+        std::io::Cursor::new(Vec::new()),
+        &pw::spa::pod::Value::Object(obj),
+    )?
+    .0
+    .into_inner())
+}
+
+/// EnumFormat: vídeo crudo de 32 bits. Con tamaño fijo Mutter lo usa como
+/// resolución del monitor virtual; con `follow` se acepta el tamaño y la
+/// frecuencia de refresco que ofrezca el compositor (p. ej. 59.932 Hz CVT en
+/// Niri o KWin). Si `with_linear_modifier` es `true`, ofrece el modificador
+/// `DRM_FORMAT_MOD_LINEAR` (0) para compositores que exigen DMABUF (Niri).
+fn video_format_pod(
+    width: u32,
+    height: u32,
+    fps: u32,
+    follow: bool,
+    with_linear_modifier: bool,
+) -> Result<Vec<u8>> {
+    use pw::spa::param::format::{FormatProperties, MediaSubtype, MediaType};
+    use pw::spa::pod::{ChoiceValue, Property, PropertyFlags};
+    use pw::spa::utils::{Choice, ChoiceEnum, ChoiceFlags, Rectangle};
+    let mut obj = if follow {
+        pw::spa::pod::object!(
+            pw::spa::utils::SpaTypes::ObjectParamFormat,
+            pw::spa::param::ParamType::EnumFormat,
+            pw::spa::pod::property!(FormatProperties::MediaType, Id, MediaType::Video),
+            pw::spa::pod::property!(FormatProperties::MediaSubtype, Id, MediaSubtype::Raw),
+            pw::spa::pod::property!(
+                FormatProperties::VideoFormat,
+                Choice,
+                Enum,
+                Id,
+                VideoFormat::BGRx,
+                VideoFormat::BGRx,
+                VideoFormat::BGRA,
+                VideoFormat::RGBx,
+                VideoFormat::RGBA,
+            ),
+        )
+    } else {
+        pw::spa::pod::object!(
+            pw::spa::utils::SpaTypes::ObjectParamFormat,
+            pw::spa::param::ParamType::EnumFormat,
+            pw::spa::pod::property!(FormatProperties::MediaType, Id, MediaType::Video),
+            pw::spa::pod::property!(FormatProperties::MediaSubtype, Id, MediaSubtype::Raw),
+            pw::spa::pod::property!(
+                FormatProperties::VideoFormat,
+                Choice,
+                Enum,
+                Id,
+                VideoFormat::BGRx,
+                VideoFormat::BGRx,
+                VideoFormat::BGRA,
+                VideoFormat::RGBx,
+                VideoFormat::RGBA,
+            ),
+            pw::spa::pod::property!(FormatProperties::VideoSize, Rectangle, Rectangle { width, height }),
+            // Como gnome-remote-desktop: frames a ritmo variable (sólo cuando hay
+            // cambios) con un máximo explícito.
+            pw::spa::pod::property!(
+                FormatProperties::VideoFramerate,
+                Fraction,
+                pw::spa::utils::Fraction { num: 0, denom: 1 }
+            ),
+            pw::spa::pod::property!(
+                FormatProperties::VideoMaxFramerate,
+                Choice,
+                Range,
+                Fraction,
+                pw::spa::utils::Fraction { num: fps, denom: 1 },
+                pw::spa::utils::Fraction { num: 1, denom: 1 },
+                pw::spa::utils::Fraction { num: fps, denom: 1 }
+            ),
+        )
+    };
+    if with_linear_modifier {
+        obj.properties.push(Property {
+            key: FormatProperties::VideoModifier.as_raw(),
+            flags: PropertyFlags::from_bits_retain(0x18), // MANDATORY (0x08) | DONT_FIXATE (0x10)
+            value: pw::spa::pod::Value::Choice(ChoiceValue::Long(Choice(
+                ChoiceFlags::empty(),
+                ChoiceEnum::Enum {
+                    default: 0,
+                    alternatives: vec![0],
+                },
+            ))),
+        });
+    }
     Ok(pw::spa::pod::serialize::PodSerializer::serialize(
         std::io::Cursor::new(Vec::new()),
         &pw::spa::pod::Value::Object(obj),

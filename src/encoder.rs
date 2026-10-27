@@ -3,7 +3,8 @@
 //! Backends:
 //! * **NVENC** (GStreamer `nvh264enc`): la GPU NVIDIA convierte BGRx→YUV y
 //!   codifica; unos pocos ms por frame incluso a 2340×1080.
-//! * **VA-API** (GStreamer `vah264enc`, Intel/AMD): mismo esquema. Best-effort.
+//! * **VA-API** (GStreamer `vah264lpenc` / `vah264enc`, Intel/AMD): la GPU
+//!   convierte con `vapostproc` y codifica en hardware.
 //! * **OpenH264** (CPU): siempre disponible, válido hasta ~720p a 60 fps.
 //!
 //! En modo `auto` se prueba cada backend de hardware codificando un frame
@@ -230,8 +231,10 @@ struct GstBackend {
     name: &'static str,
     pipeline: gst::Pipeline,
     src: gst_app::AppSrc,
-    /// Codificador NVENC, cuyo bitrate se puede cambiar en marcha.
-    nvenc: Option<gst::Element>,
+    /// Codificador hardware (`nvh264enc`, `vah264lpenc`, `vah264enc`), cuyo
+    /// bitrate se puede cambiar en marcha.
+    enc: Option<gst::Element>,
+    vbv_prop: Option<&'static str>,
     vbv: u32,
     size: (usize, usize),
     order: PixelOrder,
@@ -251,30 +254,85 @@ impl GstBackend {
             f.order.gst_format()
         );
         // Un único filtro de caps: gst-launch no acepta dos seguidos.
-        let caps = "stream-format=byte-stream,alignment=au";
+        // Constrained Baseline: lo que anuncia la señalización WebRTC.
+        let caps = "profile=constrained-baseline,stream-format=byte-stream,alignment=au";
         let output = "appsink name=sink sync=false emit-signals=false";
-        let (name, desc) = match kind {
-            // Constrained Baseline: lo que anuncia la señalización WebRTC.
-            EncoderKind::Nvenc => (
+        let candidates: Vec<(&'static str, Option<&'static str>, String)> = match kind {
+            EncoderKind::Nvenc => vec![(
                 "NVENC (GPU NVIDIA)",
+                Some("vbv-buffer-size"),
                 format!(
                     "{input} ! nvh264enc name=enc preset=p1 tune=ultra-low-latency rc-mode=cbr \
                      bitrate={kbps} vbv-buffer-size={vbv} gop-size={gop} bframes=0 zerolatency=true \
                      repeat-sequence-header=true \
-                     ! video/x-h264,profile=constrained-baseline,{caps} ! {output}"
+                     ! video/x-h264,{caps} ! {output}"
                 ),
-            ),
-            EncoderKind::Vaapi => (
-                "VA-API (GPU)",
-                format!(
-                    "{input} ! videoconvert ! video/x-raw,format=NV12 \
-                     ! vah264enc rate-control=cbr bitrate={kbps} key-int-max={va_gop} b-frames=0 \
-                     target-usage=7 ! h264parse config-interval=-1 ! video/x-h264,{caps} ! {output}"
+            )],
+            EncoderKind::Vaapi => vec![
+                (
+                    "VA-API Low-Power (GPU)",
+                    Some("cpb-size"),
+                    format!(
+                        "{input} ! vapostproc \
+                         ! vah264lpenc name=enc rate-control=cbr bitrate={kbps} cpb-size={vbv} \
+                         key-int-max={va_gop} b-frames=0 target-usage=7 \
+                         ! h264parse config-interval=-1 ! video/x-h264,{caps} ! {output}"
+                    ),
                 ),
-            ),
+                (
+                    "VA-API (GPU)",
+                    Some("cpb-size"),
+                    format!(
+                        "{input} ! vapostproc \
+                         ! vah264enc name=enc rate-control=cbr bitrate={kbps} cpb-size={vbv} \
+                         key-int-max={va_gop} b-frames=0 target-usage=7 \
+                         ! h264parse config-interval=-1 ! video/x-h264,{caps} ! {output}"
+                    ),
+                ),
+                (
+                    "VA-API (GPU)",
+                    Some("cpb-size"),
+                    format!(
+                        "{input} ! videoconvert ! video/x-raw,format=NV12 \
+                         ! vah264enc name=enc rate-control=cbr bitrate={kbps} cpb-size={vbv} \
+                         key-int-max={va_gop} b-frames=0 target-usage=7 \
+                         ! h264parse config-interval=-1 ! video/x-h264,{caps} ! {output}"
+                    ),
+                ),
+                (
+                    "VA-API (GPU)",
+                    None,
+                    format!(
+                        "{input} ! videoconvert ! video/x-raw,format=NV12 \
+                         ! vaapih264enc name=enc rate-control=cbr bitrate={kbps} \
+                         keyframe-period={va_gop} max-bframes=0 \
+                         ! h264parse config-interval=-1 ! video/x-h264,{caps} ! {output}"
+                    ),
+                ),
+            ],
             _ => bail!("no es un backend GStreamer"),
         };
-        let pipeline = gst::parse::launch(&desc)
+
+        let mut last_err = anyhow!("sin candidatos GStreamer");
+        for (name, vbv_prop, desc) in candidates {
+            match Self::try_pipeline(name, vbv_prop, vbv, &desc, f, out.clone()) {
+                Ok(b) => return Ok(b),
+                Err(e) => last_err = e,
+            }
+        }
+        Err(last_err)
+    }
+
+    fn try_pipeline(
+        name: &'static str,
+        vbv_prop: Option<&'static str>,
+        vbv: u32,
+        desc: &str,
+        f: &RawFrame,
+        out: Output,
+    ) -> Result<Self> {
+        let (w, h) = (f.width, f.height);
+        let pipeline = gst::parse::launch(desc)
             .with_context(|| format!("{name}: no disponible"))?
             .downcast::<gst::Pipeline>()
             .map_err(|_| anyhow!("no es un pipeline"))?;
@@ -307,8 +365,8 @@ impl GstBackend {
         );
         pipeline.set_state(gst::State::Playing)?;
 
-        let nvenc = pipeline.by_name("enc");
-        let mut me = Self { name, pipeline, src, nvenc, vbv, size: (w, h), order: f.order };
+        let enc = pipeline.by_name("enc");
+        let mut me = Self { name, pipeline, src, enc, vbv_prop, vbv, size: (w, h), order: f.order };
         // Prueba real: el pipeline debe producir un keyframe con este frame.
         me.encode(f, true, Duration::ZERO)?;
         let deadline = Instant::now() + Duration::from_secs(3);
@@ -343,13 +401,15 @@ impl Backend for GstBackend {
     }
 
     fn set_bitrate(&mut self, kbps: u32) -> bool {
-        let Some(enc) = &self.nvenc else { return false };
+        let Some(enc) = &self.enc else { return false };
         enc.set_property("bitrate", kbps);
-        // Cambiar el VBV reinicia NVENC (= keyframe): sólo si el bitrate se
-        // ha alejado más de 2× del que lo fijó.
+        // Cambiar el VBV/CPB reinicia el codificador (= keyframe): sólo si el
+        // bitrate se ha alejado más de 2× del que lo fijó.
         let vbv = vbv_kbits(kbps);
-        if vbv > self.vbv * 2 || vbv * 2 < self.vbv {
-            enc.set_property("vbv-buffer-size", vbv);
+        if let Some(prop) = self.vbv_prop
+            && (vbv > self.vbv * 2 || vbv * 2 < self.vbv)
+        {
+            enc.set_property(prop, vbv);
             self.vbv = vbv;
         }
         true

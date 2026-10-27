@@ -6,7 +6,7 @@
 
 <p align="center">
   <strong>Tu tablet Android como segundo monitor de tu PC con Linux.</strong><br />
-  O úsala con el ratón, el teclado y el portapapeles del PC. Para GNOME y KDE Plasma (Wayland),
+  O úsala con el ratón, el teclado y el portapapeles del PC. Para GNOME, KDE Plasma y Niri (Wayland),
   por cable USB o por WiFi, sin root.
 </p>
 
@@ -49,11 +49,22 @@ Lo único que cambia entre escritorios está en [`src/backend/`](src/backend):
 |---|---|---|---|
 | GNOME | `RecordVirtual` de Mutter (D-Bus) | `org.gnome.Mutter.RemoteDesktop` | Encaje la guarda y la repone |
 | KDE Plasma 6 | `zkde_screencast_unstable_v1` de KWin (Wayland) | `org_kde_kwin_fake_input` | KWin la recuerda sola |
+| Niri | Conector DRM libre + `RecordMonitor` (D-Bus) | `/dev/uinput` | Encaje la guarda y la aplica con `niri msg` |
 
 En KDE, KWin sólo da esos protocolos a programas con un acceso directo que
 los pida (como krfb); Encaje lo crea al arrancar en
 `~/.local/share/applications/dev.encaje.kwin.desktop`. El tamaño del
 monitor se cambia con `kscreen-doctor`, que viene con Plasma.
+
+En Niri, Encaje enciende un conector DRM libre (`HDMI-A-*` o `DP-*`) en
+`/sys/class/drm/card*-*/status`, lo publica por D-Bus (`org.gnome.Mutter.ScreenCast`)
+e inyecta la entrada por `/dev/uinput`. Para no necesitar `sudo`, tu usuario debe
+pertenecer a los grupos `video` e `input` y tener esta regla en
+`/etc/udev/rules.d/99-drm-connector-status.rules`:
+
+```udev
+ACTION=="add|change", SUBSYSTEM=="drm", KERNEL=="card[0-9]*-*", RUN+="/bin/sh -c 'chgrp video /sys%p/status && chmod 0664 /sys%p/status'"
+```
 
 ## Instalación (sin compilar)
 
@@ -76,10 +87,11 @@ directamente, con su registro a la vista. Opciones por defecto (ver
 --fps 60 --bitrate 20000
 ```
 
-Requisitos: GNOME o KDE Plasma 6 sobre Wayland, con PipeWire y GStreamer
+Requisitos: GNOME, KDE Plasma 6 o Niri sobre Wayland, con PipeWire y GStreamer
 (vienen de serie).
-Para codificar con la GPU NVIDIA hace falta el plugin `nvcodec` de
-`gstreamer1-plugins-bad`; si no está, se usa la CPU.
+Para codificar por hardware hacen falta los plugins de GStreamer de tu GPU:
+`nvcodec` (NVIDIA) o `va` (`vah264lpenc` / `vah264enc`, Intel/AMD) en
+`gstreamer1-plugins-bad`; si no están, se usa la CPU.
 
 Los paquetes se generan con `packaging/build-dist.sh`.
 
@@ -219,6 +231,7 @@ OpenH264 sólo es razonable hasta ~1280×720.
 | `src/backend/gnome.rs` | GNOME: monitor virtual y entrada (D-Bus a Mutter). |
 | `src/backend/mutter_layout.rs` | GNOME: disposición de monitores (`DisplayConfig`). |
 | `src/backend/kde.rs` | KDE Plasma: monitor virtual y entrada (protocolos Wayland de KWin). |
+| `src/backend/niri.rs` | Niri: activación de conector DRM, screencast PipeWire y entrada por `/dev/uinput`. |
 | `src/backend/layout.rs` | Común: pantalla vecina y posición guardada de la tablet. |
 | `src/capture.rs` | Consumidor PipeWire; deja sólo el frame más reciente. |
 | `src/encoder.rs` | Backends H.264, keyframes bajo demanda, estadísticas. |
@@ -234,15 +247,13 @@ OpenH264 sólo es razonable hasta ~1280×720.
 
 ## Limitaciones
 
-- Sólo GNOME y KDE Plasma sobre Wayland. Para Hyprland/Sway (wlroots) o
+- Sólo GNOME, KDE Plasma y Niri sobre Wayland. Para Hyprland/Sway (wlroots) o
   X11 (Cinnamon, XFCE) haría falta otro backend en `src/backend/`.
 - KDE: probado con un KWin 6.7 de prueba (sin pantalla), aún no en una
   sesión de Plasma con la tablet.
 - Sin audio.
 - WebRTC no reacciona a los PLI del navegador; se recupera con el IDR
   periódico (cada 2 s).
-- El backend VA-API no se ha probado (en este equipo el driver de Intel no
-  codifica H.264).
 
 ## Material promocional
 
