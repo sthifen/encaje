@@ -22,6 +22,11 @@ PLATFORM_ZIP=platform-36_r02.zip
 REPO=https://dl.google.com/android/repository
 MIN_SDK=24
 
+# La versión de la app es la del programa (Cargo.toml): 0.8.0 → código 800.
+VERSION="$(grep -m1 '^version' "$HERE/../Cargo.toml" | cut -d'"' -f2)"
+IFS=. read -r V_MAJOR V_MINOR V_PATCH <<<"$VERSION"
+VERSION_CODE=$((V_MAJOR * 10000 + V_MINOR * 100 + V_PATCH))
+
 BT="$SDK/build-tools/$BT_VER"
 ANDROID_JAR="$SDK/platforms/$PLATFORM/android.jar"
 OUT="$HERE/build"
@@ -49,7 +54,7 @@ echo "→ recursos"
 "$BT/aapt2" link -o "$OUT/base.apk" -I "$ANDROID_JAR" \
   --manifest "$HERE/AndroidManifest.xml" -A "$HERE/assets" \
   --java "$OUT/gen" --min-sdk-version $MIN_SDK --target-sdk-version 36 \
-  --version-code 1 --version-name 0.1.0 "$OUT/res.zip"
+  --version-code "$VERSION_CODE" --version-name "$VERSION" "$OUT/res.zip"
 
 echo "→ java"
 "${JAVAC[@]}" -source 17 -target 17 -nowarn -Xlint:-options -encoding UTF-8 \
