@@ -23,6 +23,8 @@
   button:disabled { opacity: .45; }
   .row { display: flex; gap: 8px; }
   .row input:last-child { max-width: 90px; }
+  #native-row { grid-column: 1 / -1; color: #9a9a9a; font-size: 13px; display: flex; gap: 8px; align-items: center; }
+  #native-row[hidden] { display: none; }
   #msg { grid-column: 1 / -1; color: #f0883e; font-size: 13px; min-height: 1em; }
   @media (max-width: 560px) { main { grid-template-columns: 1fr; } }
 </style>
@@ -42,6 +44,7 @@
     <div class="row"><input id="host" placeholder="192.168.1.50" inputmode="decimal" autocomplete="off"><input id="port" value="8787" inputmode="numeric"></div>
     <button id="wifi-btn">Conectar por WiFi</button>
   </section>
+  <label id="native-row" hidden><input type="checkbox" id="native"> Visor nativo (menos retraso; desmárcalo para usar el del navegador)</label>
   <div id="msg"></div>
 </main>
 <script>
@@ -60,8 +63,19 @@ async function probe(host, port) {
   try { const r = await fetch(`http://${host}:${port}/info`, { signal: ctl.signal, cache: "no-store" }); return r.ok ? await r.json() : null; }
   catch (_) { return null; } finally { clearTimeout(t); }
 }
-// "localhost" es contexto seguro: el visor podrá usar WebCodecs (menor latencia).
-const go = (host, port) => { location.href = `http://${host}:${port}/`; };
+// Visor nativo de la app (MediaCodec directo a la pantalla) si está
+// disponible y elegido; si no, el web ("localhost" es contexto seguro: podrá
+// usar WebCodecs).
+const bridge = window.EncajeNative;
+if (bridge) {
+  $("native-row").hidden = false;
+  $("native").checked = bridge.isEnabled();
+  $("native").onchange = () => bridge.setEnabled($("native").checked);
+}
+const go = (host, port) => {
+  if (bridge && bridge.open(host, parseInt(port, 10) || 8787)) return;
+  location.href = `http://${host}:${port}/`;
+};
 
 async function pollUsb() {
   const port = $("port").value || "8787";

@@ -118,7 +118,7 @@ function startWebSocket() {
   }
   const ws = new WebSocket(wsBase + "/ws/video");
   ws.binaryType = "arraybuffer";
-  let decoder = null, configured = null, waitKey = true, closed = false;
+  let decoder = null, configured = null, configuredAt = 0, waitKey = true, closed = false;
   // Medidas para el PC (las registra): cuánto tarda en decodificar cada
   // frame, cuánto en dibujarlo y cuántas veces hubo que resincronizar.
   const sent = new Map();
@@ -137,7 +137,7 @@ function startWebSocket() {
   // Ventanas de 2 s para la frecuencia adaptativa.
   const win = { maxQueue: 0, resyncs: 0, decodeMs: 0, n: 0 };
   const adaptTimer = setInterval(() => {
-    if (configured && win.n > 10) adaptFps(win.maxQueue, win.resyncs, win.decodeMs / win.n);
+    if (configured && win.n > 10 && performance.now() - configuredAt > 4000) adaptFps(win.maxQueue, win.resyncs, win.decodeMs / win.n);
     Object.assign(win, { maxQueue: 0, resyncs: 0, decodeMs: 0, n: 0 });
   }, 2000);
   let decoderName = "?";
@@ -178,6 +178,7 @@ function startWebSocket() {
         const config = { codec: sps.codec, optimizeForLatency: true, hardwareAcceleration: "no-preference" };
         decoder.configure(config);
         configured = sps.id;
+        configuredAt = performance.now();
         VideoDecoder.isConfigSupported({ ...config, hardwareAcceleration: "prefer-hardware" })
           .then((r) => { decoderName = r.supported ? "hardware" : "software"; }).catch(() => {});
       }

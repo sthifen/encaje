@@ -382,16 +382,41 @@ fn request_fps(s: &AppState, hz: f64) {
         .unwrap_or(60);
     let fps = near.min(max);
     // Cambiar de frecuencia recrea el codificador (un keyframe): como mucho
-    // cada 2 s, aunque un visor mande medidas que bailan.
-    static LAST_CHANGE: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
-    let mut last = LAST_CHANGE.lock().unwrap_or_else(|e| e.into_inner());
-    if last.is_some_and(|t| t.elapsed() < Duration::from_secs(2)) {
+    // cada 2 s, aunque un visor mande medidas que bailan. Lo que llega antes
+    // no se pierde: se aplica la última petición al vencer el plazo.
+    let mut p = FPS_PACING.lock().unwrap_or_else(|e| e.into_inner());
+    let wait = p.last.map_or(Duration::ZERO, |t| Duration::from_secs(2).saturating_sub(t.elapsed()));
+    if wait.is_zero() {
+        p.queued = None;
+        apply_fps(&mut p, &s.capture, fps);
         return;
     }
-    if s.capture.fps.load(std::sync::atomic::Ordering::Relaxed) != fps {
-        *last = Some(Instant::now());
-        tracing::info!("el visor pide {hz:.1} fps (su pantalla o lo que decodifica): se transmite a {fps} fps");
-        s.capture.set_fps(fps);
+    if p.queued.replace(fps).is_none() {
+        let capture = s.capture.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(wait).await;
+            let mut p = FPS_PACING.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(fps) = p.queued.take() {
+                apply_fps(&mut p, &capture, fps);
+            }
+        });
+    }
+}
+
+struct FpsPacing {
+    /// Último cambio aplicado.
+    last: Option<Instant>,
+    /// Petición esperando a que pase el plazo.
+    queued: Option<u32>,
+}
+
+static FPS_PACING: std::sync::Mutex<FpsPacing> = std::sync::Mutex::new(FpsPacing { last: None, queued: None });
+
+fn apply_fps(p: &mut FpsPacing, capture: &Capture, fps: u32) {
+    if capture.fps.load(std::sync::atomic::Ordering::Relaxed) != fps {
+        p.last = Some(Instant::now());
+        tracing::info!("el visor pide {fps} fps (su pantalla o lo que decodifica)");
+        capture.set_fps(fps);
     }
 }
 

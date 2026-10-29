@@ -19,12 +19,21 @@
             android:screenOrientation="sensorLandscape"
             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|keyboard|smallestScreenSize|uiMode"
             android:windowSoftInputMode="adjustNothing"
-            android:launchMode="singleTask">
+            android:launchMode="singleTop">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- Visor nativo: MediaCodec de baja latencia directo a la pantalla. -->
+        <activity
+            android:name=".NativeViewerActivity"
+            android:exported="false"
+            android:screenOrientation="sensorLandscape"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|keyboard|smallestScreenSize|uiMode|navigation"
+            android:windowSoftInputMode="adjustNothing|stateHidden"
+            android:theme="@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen" />
 
         <!-- Imagen copiada en el PC, para el portapapeles (ClipProvider). -->
         <provider

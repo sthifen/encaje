@@ -2,6 +2,9 @@ package dev.encaje;
 
 import android.annotation.SuppressLint;
 import android.app.Activity;
+import android.content.Intent;
+import android.content.SharedPreferences;
+import android.webkit.JavascriptInterface;
 import android.graphics.Color;
 import android.os.Build;
 import android.os.Bundle;
@@ -36,7 +39,7 @@ public class MainActivity extends Activity {
                     WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
         }
 
-        preferHighestRefreshRate();
+        preferHighestRefreshRate(this);
 
         web = new WebView(this);
         web.setBackgroundColor(Color.BLACK);
@@ -61,6 +64,7 @@ public class MainActivity extends Activity {
                 }
             }
         });
+        web.addJavascriptInterface(new NativeBridge(), "EncajeNative");
         setContentView(web);
 
         if (state != null) {
@@ -77,9 +81,9 @@ public class MainActivity extends Activity {
      * mide la frecuencia y el PC transmite a ese ritmo.
      */
     @SuppressWarnings("deprecation")
-    private void preferHighestRefreshRate() {
+    static void preferHighestRefreshRate(Activity a) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return;
-        Display d = getWindowManager().getDefaultDisplay();
+        Display d = a.getWindowManager().getDefaultDisplay();
         Display.Mode best = d.getMode();
         for (Display.Mode m : d.getSupportedModes()) {
             if (m.getPhysicalWidth() == best.getPhysicalWidth()
@@ -88,10 +92,55 @@ public class MainActivity extends Activity {
                 best = m;
             }
         }
-        WindowManager.LayoutParams lp = getWindow().getAttributes();
+        WindowManager.LayoutParams lp = a.getWindow().getAttributes();
         lp.preferredDisplayModeId = best.getModeId();
         lp.preferredRefreshRate = best.getRefreshRate();
-        getWindow().setAttributes(lp);
+        a.getWindow().setAttributes(lp);
+    }
+
+    /**
+     * El lanzador (launcher.html) pregunta por aquí si abrir el visor nativo
+     * (por defecto) o el web. La preferencia se guarda en la app.
+     */
+    private final class NativeBridge {
+        private SharedPreferences prefs() {
+            return getSharedPreferences("encaje", MODE_PRIVATE);
+        }
+
+        @JavascriptInterface
+        public boolean isEnabled() {
+            return prefs().getBoolean("native", true);
+        }
+
+        @JavascriptInterface
+        public void setEnabled(boolean on) {
+            prefs().edit().putBoolean("native", on).apply();
+        }
+
+        /** Abre el visor nativo; {@code false} si se prefiere el web. */
+        @JavascriptInterface
+        public boolean open(String host, int port) {
+            if (!isEnabled()) return false;
+            runOnUiThread(() -> startActivityForResult(new Intent(MainActivity.this, NativeViewerActivity.class)
+                    .putExtra(NativeViewerActivity.EXTRA_HOST, host)
+                    .putExtra(NativeViewerActivity.EXTRA_PORT, port), REQUEST_NATIVE));
+            return true;
+        }
+    }
+
+    private static final int REQUEST_NATIVE = 1;
+
+    @Override
+    protected void onActivityResult(int request, int result, Intent data) {
+        super.onActivityResult(request, result, data);
+        if (request != REQUEST_NATIVE) return;
+        if (result == NativeViewerActivity.RESULT_WEB && data != null) {
+            // "Usar el visor web" desde el menú del nativo: sólo esta vez.
+            web.loadUrl("http://" + data.getStringExtra(NativeViewerActivity.EXTRA_HOST) + ":"
+                    + data.getIntExtra(NativeViewerActivity.EXTRA_PORT, 8787) + "/");
+        } else {
+            web.loadUrl(LAUNCHER + "#manual"); // volvió con "atrás": no reconectar solo
+        }
     }
 
     @Override
@@ -103,20 +152,20 @@ public class MainActivity extends Activity {
     @Override
     public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
-        if (hasFocus) enterImmersive();
+        if (hasFocus) enterImmersive(this);
     }
 
     @SuppressWarnings("deprecation")
-    private void enterImmersive() {
+    static void enterImmersive(Activity a) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            getWindow().setDecorFitsSystemWindows(false);
-            WindowInsetsController c = getWindow().getInsetsController();
+            a.getWindow().setDecorFitsSystemWindows(false);
+            WindowInsetsController c = a.getWindow().getInsetsController();
             if (c != null) {
                 c.hide(WindowInsets.Type.systemBars());
                 c.setSystemBarsBehavior(WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
             }
         } else {
-            getWindow().getDecorView().setSystemUiVisibility(
+            a.getWindow().getDecorView().setSystemUiVisibility(
                     View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
                     | View.SYSTEM_UI_FLAG_FULLSCREEN
                     | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION

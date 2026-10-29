@@ -33,7 +33,8 @@ impl VirtualDisplay for TestDisplay {
         self.placed.subscribe()
     }
 
-    async fn inject(&self, _ev: InputEvent, _size: (u32, u32)) -> Result<()> {
+    async fn inject(&self, ev: InputEvent, _size: (u32, u32)) -> Result<()> {
+        tracing::trace!("entrada de prueba: {ev:?}");
         INPUT_EVENTS.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }

@@ -225,20 +225,29 @@ captura y envío, el coste de codificar y la edad del frame, y lo que mide el
 visor: cuánto tarda en decodificar y dibujar, la cola del decodificador y las
 resincronizaciones (también en el menú ⋮ del visor).
 
-### Fluidez en tablets modestas
+### Fluidez en tablets modestas: el visor nativo
+
+La app de Android trae su propio visor (`NativeViewerActivity`): recibe el
+mismo flujo que el visor web, lo decodifica con **MediaCodec en modo de baja
+latencia** (`KEY_LOW_LATENCY` y las claves de cada fabricante) y lo dibuja
+**directamente en la pantalla**, sin WebView, sin canvas y sin JavaScript de
+por medio. Es el que se abre por defecto; en el lanzador se puede desmarcar
+*Visor nativo* para usar el del navegador, y en su menú ⋮ hay *Usar el visor
+web*, *Teclado*, la resolución y las estadísticas.
 
 El visor mide la frecuencia de su pantalla y el PC transmite a ese ritmo; la
-app de Android pide además el modo de pantalla con más hercios (muchas
-tablets dejan las apps a 60 Hz si no). Si el decodificador de la tablet no
-da abasto (se nota en que tarda más de dos frames en devolver cada uno), el
-visor pide la siguiente frecuencia más baja (90 → 75 → 60…) y, pasado un
-minuto, vuelve a probar. Medido en una Lenovo Tab M11 (MediaTek, 90 Hz,
-decodificando en el WebView):
+app pide además el modo de pantalla con más hercios (muchas tablets dejan
+las apps a 60 Hz si no). Si el decodificador no da abasto (hace cola o tarda
+más de dos frames en devolver cada uno), se pide la siguiente frecuencia más
+baja (90 → 75 → 60…) y, pasado un minuto, se vuelve a probar.
 
-| | Retraso al decodificar | Cola | Resincronizaciones |
-|---|---|---|---|
-| 90 fps forzados | 110–135 ms | 14–15 frames | 4–5 cada 5 s |
-| Automático (se queda en 60) | ~14,5 ms | 0 | 0 |
+Medido en una Lenovo Tab M11 (MediaTek MT8786, pantalla de 90 Hz, por USB):
+
+| Visor | Resolución | fps | Retraso al decodificar | Cola | Resincronizaciones |
+|---|---|---|---|---|---|
+| Web, 90 fps forzados | 960×600 | ~81 | 110–135 ms | 14–15 frames | 4–5 cada 5 s |
+| Web, automático | 960×600 | 60 | ~14,5 ms | 0 | 0 |
+| **Nativo, automático** | **1920×1200** | **89,4** | **~14,7 ms** | **1** | **0** |
 
 Además el servidor desactiva Nagle (`TCP_NODELAY`) en todas las conexiones,
 agrupa las peticiones de keyframe (como mucho una cada 250 ms, aunque entren
@@ -294,7 +303,7 @@ packaging/compat/build.sh && tests/distros/run.sh 30
 | `src/clipboard.rs` | Portapapeles del PC (X11 + XFixes) para el modo `--input-only`. |
 | `android/server/` | Servidor UHID y de portapapeles para la tablet; `android/build-apk.sh` genera `input-server.jar`. |
 | `web/index.html` | Visor (incrustado en el binario). |
-| `android/` | App: WebView a pantalla completa y lanzador USB/WiFi. Se compila sin Gradle. |
+| `android/` | App: lanzador USB/WiFi, visor nativo (MediaCodec) y visor web (WebView). Se compila sin Gradle. |
 
 ## Limitaciones
 
