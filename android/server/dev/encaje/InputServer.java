@@ -38,7 +38,8 @@ import java.util.regex.Pattern;
  *
  * Android 16 ignora los ratones HID absolutos, así que el ratón es relativo.
  * Con la aceleración desactivada el puntero avanza una cantidad fija por
- * unidad, y el PC puede llevar la cuenta de dónde está. Una sola sesión por
+ * unidad, y el PC puede llevar la cuenta de dónde está. Donde no se puede
+ * desactivar (Android 15 con la curva nueva), se limita la velocidad (Pacer). Una sola sesión por
  * proceso: al cerrarse el socket se destruyen los dispositivos, se restaura
  * la aceleración y el proceso termina.
  */
@@ -82,6 +83,7 @@ public final class InputServer {
 
     private static final String[] savedAccel = new String[ACCEL_SETTINGS.length];
     private static FileDescriptor mouse;
+    private static Pacer pacer;
     private static FileDescriptor keyboard;
 
     private static final int DEV_CLIPBOARD = 2;
@@ -106,6 +108,10 @@ public final class InputServer {
             DataOutputStream out = new DataOutputStream(client.getOutputStream());
             float scale = calibrate();
             System.out.println("escala del puntero: " + scale);
+            if (accelerationStuck()) {
+                pacer = new Pacer();
+                System.out.println("aceleración no desactivable: velocidad limitada a " + Pacer.MAX_SPEED + " u/s");
+            }
             watchDisplay(out, scale);
             watchClipboard(out);
 
@@ -119,7 +125,8 @@ public final class InputServer {
                 }
                 int len = in.readUnsignedByte();
                 in.readFully(report, 0, len);
-                input(dev == 0 ? mouse : keyboard, report, len);
+                if (dev == 0 && pacer != null && len == 7) pacer.report(report);
+                else input(dev == 0 ? mouse : keyboard, report, len);
             }
         } catch (IOException e) {
             // El PC cerró la conexión.
@@ -187,6 +194,8 @@ public final class InputServer {
             move(0, -1);
             Thread.sleep(150);
             float[] a = hoverPosition();
+            // Android 15: el dump ya no trae la posición; no tiene sentido reintentar.
+            if (a == null && sh("dumpsys input").contains("hoveringPointers=[Pointer(id=0, MOUSE)]")) break;
             for (int i = 0; i < 4; i++) {
                 move(50, 50);
                 Thread.sleep(20);
@@ -200,8 +209,114 @@ public final class InputServer {
                 if (k > 0.1f && k < 10f) return k;
             }
         }
+        float k = calibrateByScreenshot();
+        if (k > 0) return k;
         System.out.println("no se pudo medir la escala del puntero; se usa 1");
         return 1f;
+    }
+
+    /**
+     * Android 15 ya no pone la posición del puntero en `dumpsys input`: se
+     * busca el cursor en capturas de pantalla. Desde la esquina se baja 100
+     * unidades (captura A), se avanza 200 a la derecha (B) y se vuelve (C),
+     * todo despacio para que no haya aceleración. Sólo cuenta lo que cambia
+     * entre A y B y vuelve a estar igual en C (el cursor, no un reloj o una
+     * animación). La escala se mide en X (cuánto avanzó) y en Y (a qué altura
+     * quedó) y sólo vale si las dos coinciden.
+     */
+    private static float calibrateByScreenshot() throws Exception {
+        for (int attempt = 0; attempt < 3; attempt++) {
+            move(-32767, -32767);
+            Thread.sleep(600);
+            walk(25, 0, 4);
+            int[][] a = screenshot();
+            walk(50, 4, 0);
+            int[][] b = screenshot();
+            walk(50, -4, 0);
+            int[][] c = screenshot();
+            float k = cursorScale(a, b, c);
+            System.out.println("escala del puntero por capturas (intento " + (attempt + 1) + "): " + k);
+            if (k > 0) return k;
+        }
+        return -1;
+    }
+
+    /** n pasos de (dx, dy) cada 20 ms (200 u/s) y una pausa para que se pinte. */
+    private static void walk(int n, int dx, int dy) throws Exception {
+        for (int i = 0; i < n; i++) {
+            move(dx, dy);
+            Thread.sleep(20);
+        }
+        Thread.sleep(300);
+    }
+
+    private static float cursorScale(int[][] a, int[][] b, int[][] c) {
+        if (a == null || b == null || c == null) return -1;
+        int h = a.length, w = a[0].length;
+        if (b.length != h || c.length != h || b[0].length != w || c[0].length != w) return -1;
+        // Franja del cursor de partida, pegado al borde izquierdo.
+        int top = -1, bottom = -1;
+        for (int y = 0; y < h; y++) {
+            for (int x = 0; x < 30; x++) {
+                if (cursor(a, b, c, x, y)) {
+                    if (top < 0) top = y;
+                    bottom = y;
+                    break;
+                }
+            }
+        }
+        if (top < 0 || bottom - top > 80) return -1;
+        // Primera columna a la derecha con varios píxeles del cursor en esa franja.
+        int found = -1;
+        for (int x = 40; x < w && found < 0; x++) {
+            int n = 0;
+            for (int y = top; y <= bottom; y++) {
+                if (cursor(a, b, c, x, y)) n++;
+            }
+            if (n >= 3) found = x;
+        }
+        if (found < 0) return -1;
+        float kx = found / 200f, ky = top / 100f;
+        if (kx < 0.3f || kx > 6f || Math.abs(kx - ky) > 0.1f * kx) return -1;
+        return kx;
+    }
+
+    /** Cambió al mover el cursor y volvió a estar igual al traerlo de vuelta. */
+    private static boolean cursor(int[][] a, int[][] b, int[][] c, int x, int y) {
+        return differs(a[y][x], b[y][x]) && !differs(a[y][x], c[y][x]);
+    }
+
+    private static boolean differs(int p, int q) {
+        for (int s = 0; s < 24; s += 8) {
+            if (Math.abs(((p >> s) & 0xFF) - ((q >> s) & 0xFF)) > 60) return true;
+        }
+        return false;
+    }
+
+    /** `screencap` sin -p: cabecera (ancho, alto, formato[, espacio de color]) y RGBA. */
+    private static int[][] screenshot() {
+        try {
+            Process p = Runtime.getRuntime().exec(new String[] {"screencap"});
+            java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream(1 << 23);
+            byte[] buf = new byte[1 << 16];
+            for (int n; (n = p.getInputStream().read(buf)) > 0; ) out.write(buf, 0, n);
+            byte[] data = out.toByteArray();
+            p.waitFor();
+            ByteBuffer bb = ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN);
+            int w = bb.getInt(0), h = bb.getInt(4);
+            int header = data.length - w * h * 4;
+            if (w <= 0 || h <= 0 || header < 12 || header > 16) return null;
+            int[][] px = new int[h][w];
+            for (int y = 0; y < h; y++) {
+                for (int x = 0; x < w; x++) {
+                    int o = header + (y * w + x) * 4;
+                    px[y][x] = (data[o] & 0xFF) | (data[o + 1] & 0xFF) << 8 | (data[o + 2] & 0xFF) << 16;
+                }
+            }
+            return px;
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     private static float[] hoverPosition() {
@@ -214,6 +329,115 @@ public final class InputServer {
         ByteBuffer r = ByteBuffer.allocate(7).order(ByteOrder.LITTLE_ENDIAN);
         r.put((byte) 0).putShort((short) dx).putShort((short) dy).put((byte) 0).put((byte) 0);
         input(mouse, r.array(), 7);
+    }
+
+    /**
+     * Android 15 con la curva de aceleración nueva (p. ej. Lenovo Tab M11) no
+     * hace caso de los ajustes de aceleración: la pantalla no aparece en
+     * "Display with Mouse Pointer Acceleration Disabled".
+     */
+    private static boolean accelerationStuck() {
+        String flag = sh("device_config get input com.android.input.flags.enable_new_mouse_pointer_ballistics").trim();
+        return flag.equals("true") && sh("dumpsys input").contains("Display with Mouse Pointer Acceleration Disabled: {}");
+    }
+
+    /**
+     * Limita la velocidad del ratón por debajo del tramo plano de la curva de
+     * aceleración (32 mm/s a 800 cpi ≈ 1000 u/s en AOSP): así el puntero avanza
+     * siempre lo mismo por unidad y el PC sabe dónde está. Lo que llega más
+     * rápido se encola y se suelta a ese ritmo; los botones y la rueda esperan
+     * a que termine el movimiento anterior para caer en su sitio.
+     */
+    static final class Pacer {
+        static final int MAX_SPEED = 850;
+        private static final long TICK_NS = 4_000_000;
+        /** Empujones contra la esquina al entrar: van directos, Android los recorta. */
+        private static final int SLAM = 16384;
+        /** Tras un empujón, que Android olvide esa velocidad (ASSUME_POINTER_STOPPED_TIME es 40 ms). */
+        private static final long SETTLE_NS = 60_000_000;
+
+        private long pendingX, pendingY;
+        private byte buttons;
+        private long holdUntil;
+
+        Pacer() {
+            Thread t = new Thread(this::run, "pacer");
+            t.setDaemon(true);
+            t.start();
+        }
+
+        /** Informe del PC: [botones] [dx i16] [dy i16] [rueda] [rueda horizontal]. */
+        synchronized void report(byte[] r) throws Exception {
+            ByteBuffer b = ByteBuffer.wrap(r, 0, 7).order(ByteOrder.LITTLE_ENDIAN);
+            byte btn = b.get();
+            int dx = b.getShort(), dy = b.getShort();
+            byte wheel = b.get(), pan = b.get();
+            if (Math.abs(dx) >= SLAM || Math.abs(dy) >= SLAM) {
+                drained();
+                send(btn, dx, dy, (byte) 0, (byte) 0);
+                holdUntil = System.nanoTime() + SETTLE_NS;
+                dx = dy = 0;
+            }
+            pendingX += dx;
+            pendingY += dy;
+            if (btn != buttons || wheel != 0 || pan != 0) {
+                drained();
+                buttons = btn;
+                send(btn, 0, 0, wheel, pan);
+            }
+            notifyAll();
+        }
+
+        private void drained() throws InterruptedException {
+            while (pendingX != 0 || pendingY != 0) wait();
+        }
+
+        private void send(byte btn, int dx, int dy, byte wheel, byte pan) throws Exception {
+            ByteBuffer r = ByteBuffer.allocate(7).order(ByteOrder.LITTLE_ENDIAN);
+            r.put(btn).putShort((short) dx).putShort((short) dy).put(wheel).put(pan);
+            input(mouse, r.array(), 7);
+        }
+
+        private synchronized void run() {
+            long last = System.nanoTime();
+            double budget = 0;
+            try {
+                while (true) {
+                    if (pendingX == 0 && pendingY == 0) {
+                        wait();
+                        last = System.nanoTime() - TICK_NS;
+                        budget = 0;
+                        continue;
+                    }
+                    long now = System.nanoTime();
+                    if (now < holdUntil) {
+                        wait(Math.max(1, (holdUntil - now) / 1_000_000));
+                        last = System.nanoTime() - TICK_NS;
+                        continue;
+                    }
+                    if (now - last < TICK_NS) {
+                        wait(1);
+                        continue;
+                    }
+                    // Lo acumulado desde el último envío, sin pasar de dos ticks (no soltar ráfagas).
+                    budget = Math.min(budget + MAX_SPEED * (now - last) / 1e9, MAX_SPEED * 2 * TICK_NS / 1e9);
+                    last = now;
+                    double dist = Math.hypot(pendingX, pendingY);
+                    double f = Math.min(1, budget / dist);
+                    long sx = Math.round(pendingX * f), sy = Math.round(pendingY * f);
+                    if (sx != 0 || sy != 0) {
+                        sx = Math.max(-32767, Math.min(32767, sx));
+                        sy = Math.max(-32767, Math.min(32767, sy));
+                        send(buttons, (int) sx, (int) sy, (byte) 0, (byte) 0);
+                        pendingX -= sx;
+                        pendingY -= sy;
+                        budget -= Math.hypot(sx, sy);
+                        if (pendingX == 0 && pendingY == 0) notifyAll();
+                    }
+                }
+            } catch (Exception ignored) {
+            }
+        }
     }
 
     // ---- Tamaño y orientación de la pantalla ----
