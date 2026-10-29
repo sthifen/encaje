@@ -135,6 +135,7 @@ button.light { background-image: none; outline: none; }
 button.light.close { background-color: #ff5f57; }
 button.light.min { background-color: #febc2e; }
 button.light.zoom { background-color: rgba(255,255,255,0.18); }
+button.light.zoom.alert { background-color: #ff9f0a; box-shadow: 0 0 10px rgba(255,159,10,0.8); }
 button.light:hover { filter: brightness(1.15); }
 "#;
 
@@ -155,7 +156,10 @@ fn build(app: &gtk::Application) {
         return;
     }
     let provider = gtk::CssProvider::new();
-    provider.load_from_string(CSS);
+    // load_from_data (GTK 4.0) en vez de load_from_string (4.12): así arranca
+    // también con el GTK 4.6 de Ubuntu 22.04 / Zorin OS 17.
+    #[allow(deprecated)]
+    provider.load_from_data(CSS);
     gtk::style_context_add_provider_for_display(
         &gdk::Display::default().expect("sin pantalla"),
         &provider,
@@ -216,6 +220,7 @@ fn build(app: &gtk::Application) {
     glass.add_overlay(&content);
 
     let lights = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let mut report_light = None;
     for (class, action) in [("close", 0), ("min", 1), ("zoom", 2)] {
         let b = gtk::Button::new();
         b.add_css_class("light");
@@ -225,8 +230,14 @@ fn build(app: &gtk::Application) {
         b.connect_clicked(move |_| match action {
             0 => w.close(),
             1 => w.minimize(),
-            _ => {}
+            _ => send_report(),
         });
+        if action == 2 {
+            // El tercer semáforo: informe para reportar un fallo. Se pone
+            // naranja cuando el servidor no consigue arrancar.
+            b.set_tooltip_text(Some("Informe de error"));
+            report_light = Some(b.clone());
+        }
         lights.append(&b);
     }
     content.append(&lights);
@@ -254,11 +265,11 @@ fn build(app: &gtk::Application) {
             Mode::Monitor => "blue",
             Mode::Input => "red",
         });
-        // Para lectores de pantalla (no se ve).
-        button.update_property(&[gtk::accessible::Property::Label(match mode {
+        // También lo leen los lectores de pantalla.
+        button.set_tooltip_text(Some(match mode {
             Mode::Monitor => "Tablet como segundo monitor",
             Mode::Input => "Tablet con el ratón y el teclado del PC",
-        })]);
+        }));
         {
             let state = state.clone();
             button.connect_clicked(move |_| {
@@ -307,6 +318,13 @@ fn build(app: &gtk::Application) {
             if s.quitting && s.running.is_none() {
                 window.destroy();
                 return glib::ControlFlow::Break;
+            }
+            if let Some(b) = &report_light {
+                if s.failures >= 2 {
+                    b.add_css_class("alert");
+                } else {
+                    b.remove_css_class("alert");
+                }
             }
             for (mode, button, icon) in &buttons {
                 if s.wanted == Some(*mode) {
@@ -488,6 +506,24 @@ fn play_overlay(mode: Mode, monitor: &serde_json::Value) {
     if let Ok(mut child) = Command::new(exe).arg("--overlay").arg(spec.to_string()).stdout(Stdio::null()).spawn() {
         std::thread::spawn(move || child.wait());
     }
+}
+
+/// Genera el informe (tarda unos segundos: consulta el sistema) y abre el
+/// archivo y la página para enviarlo.
+fn send_report() {
+    std::thread::spawn(|| match crate::diagnose::write_report() {
+        Ok(path) => {
+            tracing::info!("informe guardado en {}", path.display());
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            let _ = Command::new("xdg-open").arg(&path).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
+            let _ = Command::new("xdg-open")
+                .arg(crate::diagnose::issue_url(&text))
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn();
+        }
+        Err(e) => tracing::error!("no se pudo guardar el informe: {e}"),
+    });
 }
 
 // ---- Configuración ----

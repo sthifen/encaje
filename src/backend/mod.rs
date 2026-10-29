@@ -11,6 +11,7 @@ mod gnome;
 mod kde;
 pub mod layout;
 mod mutter_layout;
+pub mod test;
 
 use anyhow::{Result, bail};
 use async_trait::async_trait;
@@ -63,6 +64,38 @@ impl Environment {
         } else {
             None
         }
+    }
+
+    /// Como `kind`, y si las variables no lo dicen (lanzado desde otro
+    /// programa que las pierde, distros que ponen nombres propios…), mira qué
+    /// compositor responde en el bus de sesión.
+    pub async fn kind_or_probe(&self) -> Option<Desktop> {
+        if let Some(k) = self.kind() {
+            return Some(k);
+        }
+        if self.session_type == "x11" {
+            return None; // Mutter y KWin sólo crean monitores virtuales en Wayland
+        }
+        let conn = zbus::Connection::session().await.ok()?;
+        let dbus = zbus::fdo::DBusProxy::new(&conn).await.ok()?;
+        let has = |name: &'static str| {
+            let dbus = dbus.clone();
+            async move {
+                let Ok(name) = zbus::names::BusName::try_from(name) else { return false };
+                dbus.name_has_owner(name).await.unwrap_or(false)
+            }
+        };
+        let found = if has("org.gnome.Mutter.ScreenCast").await {
+            Some(Desktop::Gnome)
+        } else if has("org.kde.KWin").await {
+            Some(Desktop::Kde)
+        } else {
+            None
+        };
+        if let Some(k) = found {
+            tracing::info!("escritorio deducido por D-Bus: {k:?} (XDG_CURRENT_DESKTOP={:?})", self.desktop);
+        }
+        found
     }
 }
 
@@ -134,14 +167,23 @@ pub const CLOSED_MESSAGE: &str =
 
 /// Crea el monitor virtual con las APIs del escritorio actual.
 pub async fn create(env: &Environment, width: u32, height: u32) -> Result<Box<dyn VirtualDisplay>> {
-    match env.kind() {
+    match env.kind_or_probe().await {
         Some(Desktop::Gnome) => Ok(Box::new(gnome::GnomeDisplay::create(width, height).await?)),
         Some(Desktop::Kde) => Ok(Box::new(kde::KdeDisplay::create(width, height).await?)),
+        None if env.session_type == "x11" => bail!(
+            "La sesión es X11 ({:?}). Encaje necesita Wayland: cierra la sesión y, en la \
+             pantalla de acceso, elige la sesión con Wayland en el engranaje (en Ubuntu y \
+             Zorin OS, «Ubuntu»/«Zorin» a secas, no «on Xorg»). Con NVIDIA, Wayland necesita \
+             el driver 495 o más nuevo.",
+            env.desktop
+        ),
         None => bail!(
             "Sesión detectada: {} / {:?}. Encaje funciona en GNOME y en KDE Plasma, \
-             las dos sobre Wayland.",
+             las dos sobre Wayland. Ejecuta `encaje --diagnostico` y adjunta el informe \
+             en {}",
             env.session_type,
-            env.desktop
+            env.desktop,
+            crate::diagnose::ISSUES_URL
         ),
     }
 }

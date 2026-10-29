@@ -5,9 +5,15 @@
 #                                 enlazar releases/latest/download/ desde el README)
 #
 # El binario enlaza dinámicamente con PipeWire y GStreamer del sistema (no se
-# empaquetan: deben coincidir con los del escritorio). Requisitos en destino:
-# GNOME sobre Wayland, PipeWire y GStreamer ≥ 1.20 (presentes en cualquier
-# GNOME moderno); para NVENC, gstreamer1-plugins-bad con el plugin nvcodec.
+# empaquetan: deben coincidir con los del escritorio). Se compila en un
+# contenedor de Ubuntu 22.04 (packaging/compat/) para que arranque en
+# cualquier distro con glibc ≥ 2.34: Zorin OS 17, Ubuntu 22.04+, Mint 21+,
+# Debian 12, Fedora, Arch, openSUSE… (tests/distros/run.sh lo comprueba).
+# Requisitos en destino: GNOME o KDE Plasma 6 sobre Wayland, PipeWire y
+# GStreamer ≥ 1.20; para NVENC, gstreamer1-plugins-bad con el plugin nvcodec.
+#
+# NATIVE=1 compila con el sistema actual (más rápido, pero el binario sólo
+# arranca en distros con una glibc tan nueva como la de este equipo).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -18,10 +24,16 @@ ARCH=x86_64
 TOOL="$ROOT/target/appimagetool-$ARCH.AppImage"
 
 echo "→ compilando v$VERSION"
-cargo build --release --manifest-path "$ROOT/Cargo.toml"
+if [[ "${NATIVE:-}" == 1 ]]; then
+  cargo build --release --manifest-path "$ROOT/Cargo.toml"
+  BUILT="$ROOT/target/release/encaje"
+else
+  "$PKG/compat/build.sh"
+  BUILT="$ROOT/target/compat/release/encaje"
+fi
 rm -rf "$DIST" && mkdir -p "$DIST"
 BIN="$DIST/encaje"
-cp "$ROOT/target/release/encaje" "$BIN"
+cp "$BUILT" "$BIN"
 strip "$BIN"
 
 echo "→ tar.gz"

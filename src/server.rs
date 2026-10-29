@@ -38,7 +38,9 @@ pub struct AppState {
     pub display: Arc<dyn VirtualDisplay>,
     /// La resolución sigue a los visores (si no se fijó con --width/--height).
     pub auto_size: bool,
-    pub fps: u32,
+    /// La frecuencia sigue a la pantalla del visor (si no se fijó con --fps),
+    /// hasta este máximo.
+    pub auto_fps: Option<u32>,
 }
 
 pub async fn serve(state: AppState, listener: tokio::net::TcpListener) -> anyhow::Result<()> {
@@ -50,6 +52,11 @@ pub async fn serve(state: AppState, listener: tokio::net::TcpListener) -> anyhow
         .route("/ws/input", get(ws_input))
         .with_state(Arc::new(state));
 
+    // Sin Nagle: los frames P y las confirmaciones son paquetes pequeños que
+    // TCP retendría hasta 40 ms esperando juntar más (sobre todo por adb).
+    let listener = axum::serve::ListenerExt::tap_io(listener, |tcp| {
+        let _ = tcp.set_nodelay(true);
+    });
     axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await?;
     Ok(())
 }
@@ -65,7 +72,7 @@ async fn info(State(s): State<Arc<AppState>>) -> impl IntoResponse {
     // CORS abierto: el lanzador de la app Android consulta desde file://.
     (
         [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")],
-        Json(json!({ "width": s.capture.geometry.get().0, "height": s.capture.geometry.get().1, "fps": s.fps, "auto_size": s.auto_size })),
+        Json(json!({ "width": s.capture.geometry.get().0, "height": s.capture.geometry.get().1, "fps": s.capture.fps.load(std::sync::atomic::Ordering::Relaxed), "auto_size": s.auto_size })),
     )
 }
 
@@ -110,7 +117,7 @@ async fn ws_video(
 /// de acumular segundos de retraso en búferes de TCP/adb.
 async fn stream_video(mut socket: WebSocket, s: Arc<AppState>) {
     let (width, height) = s.capture.geometry.get();
-    let hello = json!({ "type": "config", "width": width, "height": height, "fps": s.fps });
+    let hello = json!({ "type": "config", "width": width, "height": height, "fps": s.capture.fps.load(std::sync::atomic::Ordering::Relaxed) });
     if socket.send(Message::Text(hello.to_string().into())).await.is_err() {
         return;
     }
@@ -119,17 +126,27 @@ async fn stream_video(mut socket: WebSocket, s: Arc<AppState>) {
     s.keyreq.request();
     let mut synced = false;
     let mut key_requested = true;
+    let mut last_stats = Instant::now() - Duration::from_secs(60);
     loop {
         tokio::select! {
             msg = socket.recv() => match msg {
                 Some(Ok(Message::Close(_))) | None | Some(Err(_)) => return,
                 Some(Ok(Message::Text(t))) => {
                     if t.as_str() == "keyframe" {
+                        tracing::debug!("el visor pide un keyframe (resincronizar)");
                         synced = false;
                         key_requested = true;
                         s.keyreq.request();
                     } else if let Ok(Ack { ack }) = serde_json::from_str::<Ack>(&t) {
                         flow.on_ack(ack);
+                    } else if let Ok(ViewerStats { stats }) = serde_json::from_str::<ViewerStats>(&t) {
+                        // Lo que mide el visor: decodificar, dibujar, resincronizaciones.
+                        // Como mucho cada 2 s y corto: lo manda un cliente cualquiera.
+                        let text = stats.to_string();
+                        if text.len() < 512 && last_stats.elapsed() > Duration::from_secs(2) {
+                            last_stats = Instant::now();
+                            tracing::info!("visor: {text}");
+                        }
                     }
                 }
                 _ => {}
@@ -178,6 +195,11 @@ async fn stream_video(mut socket: WebSocket, s: Arc<AppState>) {
 #[derive(serde::Deserialize)]
 struct Ack {
     ack: u64,
+}
+
+#[derive(serde::Deserialize)]
+struct ViewerStats {
+    stats: serde_json::Value,
 }
 
 /// Control de congestión de un visor WebSocket, guiado por el retraso
@@ -314,8 +336,11 @@ async fn ws_input(ws: WebSocketUpgrade, State(s): State<Arc<AppState>>) -> Respo
     ws.on_upgrade(move |mut socket| async move {
         while let Some(Ok(msg)) = socket.recv().await {
             if let Message::Text(t) = msg {
-                if let Ok(Resize { w, h }) = serde_json::from_str::<Resize>(&t) {
+                if let Ok(Resize { w, h, hz }) = serde_json::from_str::<Resize>(&t) {
                     request_size(&s, w, h);
+                    if let Some(hz) = hz {
+                        request_fps(&s, hz);
+                    }
                     continue;
                 }
                 match serde_json::from_str::<InputEvent>(&t) {
@@ -336,6 +361,38 @@ async fn ws_input(ws: WebSocketUpgrade, State(s): State<Arc<AppState>>) -> Respo
 struct Resize {
     w: u32,
     h: u32,
+    /// Frecuencia de la pantalla del visor, medida con requestAnimationFrame.
+    #[serde(default)]
+    hz: Option<f64>,
+}
+
+/// Frecuencias habituales de pantallas: la medida (con ruido) se lleva a la
+/// más cercana, para no recrear el codificador por 59 vs. 60.
+const REFRESH_RATES: [u32; 7] = [30, 48, 60, 75, 90, 120, 144];
+
+fn request_fps(s: &AppState, hz: f64) {
+    let Some(max) = s.auto_fps else { return };
+    if !hz.is_finite() || hz <= 0.0 {
+        return;
+    }
+    let near = REFRESH_RATES
+        .iter()
+        .copied()
+        .min_by(|a, b| (*a as f64 - hz).abs().total_cmp(&(*b as f64 - hz).abs()))
+        .unwrap_or(60);
+    let fps = near.min(max);
+    // Cambiar de frecuencia recrea el codificador (un keyframe): como mucho
+    // cada 2 s, aunque un visor mande medidas que bailan.
+    static LAST_CHANGE: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+    let mut last = LAST_CHANGE.lock().unwrap_or_else(|e| e.into_inner());
+    if last.is_some_and(|t| t.elapsed() < Duration::from_secs(2)) {
+        return;
+    }
+    if s.capture.fps.load(std::sync::atomic::Ordering::Relaxed) != fps {
+        *last = Some(Instant::now());
+        tracing::info!("el visor pide {hz:.1} fps (su pantalla o lo que decodifica): se transmite a {fps} fps");
+        s.capture.set_fps(fps);
+    }
 }
 
 /// Límites de NVENC H.264 y un mínimo usable.

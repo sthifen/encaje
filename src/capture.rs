@@ -7,6 +7,7 @@
 //! La conversión de color la hace cada codificador (GPU en NVENC).
 
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use bytes::Bytes;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -50,7 +51,8 @@ pub struct RawFrame {
     pub width: usize,
     pub height: usize,
     pub order: PixelOrder,
-    pub data: Vec<u8>,
+    /// `Bytes`: el codificador de GStreamer lo toma sin copiar los ~10 MB.
+    pub data: Bytes,
     pub captured: Instant,
 }
 
@@ -115,18 +117,50 @@ impl Geometry {
     }
 }
 
-/// Permite pedir otra resolución desde fuera del hilo de PipeWire.
+/// Cambios de formato pedidos desde fuera del hilo de captura.
+#[derive(Clone, Copy, Debug)]
+enum Renegotiate {
+    Size(u32, u32),
+    Fps(u32),
+}
+
+#[derive(Clone)]
+enum Control {
+    PipeWire(pw::channel::Sender<Renegotiate>),
+    /// Fuente sintética (`--fuente-prueba`): basta con cambiar `geometry`/`fps`.
+    Test,
+}
+
+/// Permite pedir otra resolución o frecuencia desde fuera del hilo de PipeWire.
 #[derive(Clone)]
 pub struct Capture {
-    resize_tx: pw::channel::Sender<(u32, u32)>,
+    ctl: Control,
     pub geometry: Arc<Geometry>,
+    /// Frecuencia máxima pedida al compositor; la lee también el codificador.
+    pub fps: Arc<AtomicU32>,
 }
 
 impl Capture {
     /// Renegocia el formato con el nuevo tamaño; Mutter cambia el modo del
     /// monitor virtual en caliente (como hace gnome-remote-desktop).
     pub fn resize(&self, width: u32, height: u32) {
-        let _ = self.resize_tx.send((width, height));
+        match &self.ctl {
+            Control::PipeWire(tx) => {
+                let _ = tx.send(Renegotiate::Size(width, height));
+            }
+            Control::Test => self.geometry.set(width, height),
+        }
+    }
+
+    /// Cambia la frecuencia máxima (p. ej. a los 90 Hz de la tablet). Mutter
+    /// crea el monitor virtual con la frecuencia máxima del formato.
+    pub fn set_fps(&self, fps: u32) {
+        if self.fps.swap(fps, Ordering::Relaxed) == fps {
+            return;
+        }
+        if let Control::PipeWire(tx) = &self.ctl {
+            let _ = tx.send(Renegotiate::Fps(fps));
+        }
     }
 }
 
@@ -148,6 +182,7 @@ pub fn spawn(node_id: u32, width: u32, height: u32, fps: u32, follow: bool, slot
     let geometry = Arc::new(Geometry::default());
     geometry.set(width, height);
     let geo = geometry.clone();
+    let fps_target = Arc::new(AtomicU32::new(fps));
     std::thread::Builder::new()
         .name("pipewire-capture".into())
         .spawn(move || {
@@ -160,7 +195,58 @@ pub fn spawn(node_id: u32, width: u32, height: u32, fps: u32, follow: bool, slot
             }
         })
         .expect("no se pudo crear el hilo de captura");
-    Capture { resize_tx, geometry }
+    Capture { ctl: Control::PipeWire(resize_tx), geometry, fps: fps_target }
+}
+
+/// Fuente sintética para pruebas sin escritorio (`--fuente-prueba`): una
+/// imagen con una banda que se mueve, al ritmo pedido y del tamaño de
+/// `geometry` (que siguen las peticiones de los visores). Cuesta lo mismo que
+/// la copia de un frame real de PipeWire.
+pub fn spawn_test(width: u32, height: u32, fps: u32, slot: Arc<FrameSlot>) -> Capture {
+    let geometry = Arc::new(Geometry::default());
+    geometry.set(width, height);
+    let fps_target = Arc::new(AtomicU32::new(fps));
+    let (geo, rate) = (geometry.clone(), fps_target.clone());
+    std::thread::Builder::new()
+        .name("test-source".into())
+        .spawn(move || {
+            let mut base: Vec<u8> = Vec::new();
+            let mut size = (0, 0);
+            let mut next = Instant::now();
+            for n in 0u64.. {
+                let (w, h) = geo.get();
+                let (w, h) = (w as usize & !1, h as usize & !1);
+                if size != (w, h) {
+                    // Fondo con degradado: comprime como un escritorio, no como ruido.
+                    base = (0..w * h).flat_map(|i| {
+                        let (x, y) = (i % w, i / w);
+                        [(x * 255 / w.max(1)) as u8, (y * 255 / h.max(1)) as u8, 96, 255]
+                    }).collect();
+                    size = (w, h);
+                }
+                let start = Instant::now();
+                let mut data = base.clone();
+                let bar = (n as usize * 8) % w.max(1);
+                for y in 0..h {
+                    let row = &mut data[y * w * 4..(y + 1) * w * 4];
+                    for x in bar..(bar + 48).min(w) {
+                        row[x * 4..x * 4 + 4].copy_from_slice(&[255, 255, 255, 255]);
+                    }
+                }
+                CAPTURED.fetch_add(1, Ordering::Relaxed);
+                COPY_US.fetch_add(start.elapsed().as_micros() as u64, Ordering::Relaxed);
+                slot.put(RawFrame { width: w, height: h, order: PixelOrder::Bgrx, data: data.into(), captured: Instant::now() });
+                next += Duration::from_secs_f64(1.0 / rate.load(Ordering::Relaxed).max(1) as f64);
+                let now = Instant::now();
+                if next > now {
+                    std::thread::sleep(next - now);
+                } else {
+                    next = now;
+                }
+            }
+        })
+        .expect("no se pudo crear la fuente de prueba");
+    Capture { ctl: Control::Test, geometry, fps: fps_target }
 }
 
 fn run(
@@ -170,7 +256,7 @@ fn run(
     follow: bool,
     slot: Arc<FrameSlot>,
     geometry: Arc<Geometry>,
-    resize_rx: pw::channel::Receiver<(u32, u32)>,
+    resize_rx: pw::channel::Receiver<Renegotiate>,
 ) -> Result<()> {
     pw::init();
     let mainloop = pw::main_loop::MainLoopRc::new(None)?;
@@ -241,13 +327,13 @@ fn run(
             let src = &bytes[offset..end];
             let row = w * 4;
             let data = if stride == row {
-                src[..row * h].to_vec()
+                Bytes::copy_from_slice(&src[..row * h])
             } else {
                 let mut v = Vec::with_capacity(row * h);
                 for y in 0..h {
                     v.extend_from_slice(&src[y * stride..y * stride + row]);
                 }
-                v
+                v.into()
             };
             CAPTURED.fetch_add(1, Ordering::Relaxed);
             COPY_US.fetch_add(captured.elapsed().as_micros() as u64, Ordering::Relaxed);
@@ -265,8 +351,20 @@ fn run(
     )?;
 
     let resizer = stream.clone();
-    let _resize = resize_rx.attach(mainloop.loop_(), move |(w, h)| {
-        tracing::info!("cambiando el monitor virtual a {w}x{h}");
+    let current = std::cell::Cell::new((width, height, fps));
+    let _resize = resize_rx.attach(mainloop.loop_(), move |msg| {
+        let (mut w, mut h, mut fps) = current.get();
+        match msg {
+            Renegotiate::Size(nw, nh) => {
+                tracing::info!("cambiando el monitor virtual a {nw}x{nh}");
+                (w, h) = (nw, nh);
+            }
+            Renegotiate::Fps(f) => {
+                tracing::info!("cambiando la frecuencia del monitor virtual a {f} Hz");
+                fps = f;
+            }
+        }
+        current.set((w, h, fps));
         let r = video_format_pod(w, h, fps, follow).map_err(|e| e.to_string()).and_then(|bytes| {
             let pod = Pod::from_bytes(&bytes).ok_or("pod inválido")?;
             resizer.update_params(&mut [pod]).map_err(|e| e.to_string())
@@ -411,7 +509,7 @@ mod tests {
         let (w, h) = (4, 4);
         let mut src = vec![255u8; w * h * 4];
         src[..w * 2 * 4].fill(0); // dos primeras filas negras
-        let raw = RawFrame { width: w, height: h, order: PixelOrder::Bgrx, data: src, captured: Instant::now() };
+        let raw = RawFrame { width: w, height: h, order: PixelOrder::Bgrx, data: src.into(), captured: Instant::now() };
         let f = to_i420(&raw);
         let (y, u, v) = f.planes();
         assert_eq!(y[0], 16);

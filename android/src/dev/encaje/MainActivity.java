@@ -5,6 +5,7 @@ import android.app.Activity;
 import android.graphics.Color;
 import android.os.Build;
 import android.os.Bundle;
+import android.view.Display;
 import android.view.View;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
@@ -35,6 +36,8 @@ public class MainActivity extends Activity {
                     WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
         }
 
+        preferHighestRefreshRate();
+
         web = new WebView(this);
         web.setBackgroundColor(Color.BLACK);
         WebSettings s = web.getSettings();
@@ -44,6 +47,11 @@ public class MainActivity extends Activity {
         s.setMediaPlaybackRequiresUserGesture(false);
         s.setCacheMode(WebSettings.LOAD_NO_CACHE);
         s.setSupportZoom(false);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            // El proceso que decodifica y dibuja el vídeo, con prioridad alta
+            // aunque Android ande justo de memoria.
+            web.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false);
+        }
         web.setWebViewClient(new WebViewClient() {
             @Override
             public void onReceivedError(WebView view, WebResourceRequest req, WebResourceError err) {
@@ -60,6 +68,30 @@ public class MainActivity extends Activity {
         } else {
             web.loadUrl(LAUNCHER);
         }
+    }
+
+    /**
+     * Pide el modo de pantalla con más hercios a la resolución actual. Sin
+     * esto, muchas tablets (Samsung con "fluidez adaptable", por ejemplo)
+     * dejan las apps WebView a 60 Hz aunque la pantalla dé 90 o 120; el visor
+     * mide la frecuencia y el PC transmite a ese ritmo.
+     */
+    @SuppressWarnings("deprecation")
+    private void preferHighestRefreshRate() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return;
+        Display d = getWindowManager().getDefaultDisplay();
+        Display.Mode best = d.getMode();
+        for (Display.Mode m : d.getSupportedModes()) {
+            if (m.getPhysicalWidth() == best.getPhysicalWidth()
+                    && m.getPhysicalHeight() == best.getPhysicalHeight()
+                    && m.getRefreshRate() > best.getRefreshRate()) {
+                best = m;
+            }
+        }
+        WindowManager.LayoutParams lp = getWindow().getAttributes();
+        lp.preferredDisplayModeId = best.getModeId();
+        lp.preferredRefreshRate = best.getRefreshRate();
+        getWindow().setAttributes(lp);
     }
 
     @Override

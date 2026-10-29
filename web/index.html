@@ -119,20 +119,46 @@ function startWebSocket() {
   const ws = new WebSocket(wsBase + "/ws/video");
   ws.binaryType = "arraybuffer";
   let decoder = null, configured = null, waitKey = true, closed = false;
+  // Medidas para el PC (las registra): cuánto tarda en decodificar cada
+  // frame, cuánto en dibujarlo y cuántas veces hubo que resincronizar.
+  const sent = new Map();
+  const perf = { decoded: 0, decodeMs: 0, drawMs: 0, maxQueue: 0, resyncs: 0, since: performance.now() };
+  const report = () => {
+    const dt = (performance.now() - perf.since) / 1000, n = Math.max(perf.decoded, 1);
+    if (ws.readyState === 1) ws.send(JSON.stringify({ stats: {
+      fps: +(perf.decoded / dt).toFixed(1), decode_ms: +(perf.decodeMs / n).toFixed(2),
+      draw_ms: +(perf.drawMs / n).toFixed(2), max_queue: perf.maxQueue, resyncs: perf.resyncs, hz: +hz.toFixed(1),
+      target_fps: targetFps(),
+      decoder: decoderName } }));
+    stats.decodeMs = perf.decodeMs / n;
+    Object.assign(perf, { decoded: 0, decodeMs: 0, drawMs: 0, maxQueue: 0, resyncs: 0, since: performance.now() });
+  };
+  const reportTimer = setInterval(report, 5000);
+  // Ventanas de 2 s para la frecuencia adaptativa.
+  const win = { maxQueue: 0, resyncs: 0, decodeMs: 0, n: 0 };
+  const adaptTimer = setInterval(() => {
+    if (configured && win.n > 10) adaptFps(win.maxQueue, win.resyncs, win.decodeMs / win.n);
+    Object.assign(win, { maxQueue: 0, resyncs: 0, decodeMs: 0, n: 0 });
+  }, 2000);
+  let decoderName = "?";
 
   const newDecoder = () => new VideoDecoder({
     output(frame) {
+      const t0 = performance.now(), t = sent.get(frame.timestamp);
+      if (t !== undefined) { perf.decodeMs += t0 - t; win.decodeMs += t0 - t; win.n++; sent.delete(frame.timestamp); }
       if (canvas.width !== frame.displayWidth || canvas.height !== frame.displayHeight) {
         canvas.width = frame.displayWidth; canvas.height = frame.displayHeight;
       }
       ctx2d.drawImage(frame, 0, 0);
       frame.close();
+      perf.drawMs += performance.now() - t0;
+      perf.decoded++;
       if (canvas.style.display !== "block") { canvas.style.display = "block"; status(""); }
       stats.frames++;
     },
     error(e) { console.error(e); configured = null; waitKey = true; requestKey(); },
   });
-  const requestKey = () => { if (ws.readyState === 1) ws.send("keyframe"); };
+  const requestKey = () => { perf.resyncs++; win.resyncs++; sent.clear(); if (ws.readyState === 1) ws.send("keyframe"); };
 
   ws.onmessage = (ev) => {
     if (typeof ev.data === "string") return; // {"type":"config",...}
@@ -149,19 +175,30 @@ function startWebSocket() {
       const sps = spsFromAnnexB(payload);
       if (sps && sps.id !== configured) {
         if (!decoder || decoder.state === "closed") decoder = newDecoder();
-        decoder.configure({ codec: sps.codec, optimizeForLatency: true, hardwareAcceleration: "no-preference" });
+        const config = { codec: sps.codec, optimizeForLatency: true, hardwareAcceleration: "no-preference" };
+        decoder.configure(config);
         configured = sps.id;
+        VideoDecoder.isConfigSupported({ ...config, hardwareAcceleration: "prefer-hardware" })
+          .then((r) => { decoderName = r.supported ? "hardware" : "software"; }).catch(() => {});
       }
       waitKey = false;
     }
     if (waitKey || !configured) return;
-    // Si el decodificador se atrasa, se descarta hasta el próximo keyframe.
-    if (decoder.decodeQueueSize > 4) { waitKey = true; requestKey(); return; }
+    // Si el decodificador se atrasa de verdad (más de ~150 ms en cola), se
+    // descarta hasta el próximo keyframe. Los decodificadores por hardware
+    // retienen varios frames por diseño: con un límite bajo (4) se
+    // resincronizaba sin parar en tablets modestas.
+    const q = decoder.decodeQueueSize;
+    perf.maxQueue = Math.max(perf.maxQueue, q);
+    win.maxQueue = Math.max(win.maxQueue, q);
+    if (q > Math.max(8, Math.round(hz * 0.15))) { waitKey = true; requestKey(); return; }
+    sent.set(pts, performance.now());
+    if (sent.size > 256) sent.delete(sent.keys().next().value);
     decoder.decode(new EncodedVideoChunk({ type: key ? "key" : "delta", timestamp: pts, data: payload }));
   };
   ws.onclose = () => { if (!closed) scheduleReconnect("Conexión de vídeo cerrada"); };
   return {
-    close() { closed = true; ws.close(); if (decoder && decoder.state !== "closed") decoder.close(); },
+    close() { closed = true; clearInterval(reportTimer); clearInterval(adaptTimer); ws.close(); if (decoder && decoder.state !== "closed") decoder.close(); },
   };
 }
 
@@ -235,15 +272,66 @@ function wantedSize() {
   const dpr = window.devicePixelRatio || 1, k = parseFloat(scale) || 1;
   return { w: Math.round(window.innerWidth * dpr * k), h: Math.round(window.innerHeight * dpr * k) };
 }
+// Frecuencia de esta pantalla (60, 90, 120 Hz…): el PC transmite a ese
+// ritmo. Se mide con requestAnimationFrame (mediana de 30 intervalos).
+let hz = 0;
+function measureHz() {
+  return new Promise((resolve) => {
+    const t = [];
+    const step = (now) => {
+      t.push(now);
+      if (t.length < 31) return requestAnimationFrame(step);
+      const d = t.slice(1).map((v, i) => v - t[i]).sort((a, b) => a - b);
+      resolve(1000 / d[d.length >> 1]);
+    };
+    requestAnimationFrame(step);
+  });
+}
+async function remeasureHz() {
+  if (document.hidden) return;
+  const m = await measureHz();
+  if (Math.abs(m - hz) > 3) { hz = m; sendSize(); }
+}
+document.addEventListener("visibilitychange", remeasureHz);
+remeasureHz();
+
+// Lo que este dispositivo decodifica sin hacer cola (ver adaptFps): puede
+// quedar por debajo de los hercios de la pantalla en tablets modestas.
+let fpsCap = Infinity;
+const RATES = [144, 120, 90, 75, 60, 48, 30];
+const targetFps = () => Math.min(hz || 60, fpsCap);
+
 function sendSize() {
   const { w, h } = wantedSize();
-  if (w > 0 && h > 0) send({ t: "resize", w, h });
+  if (w > 0 && h > 0) send(hz ? { t: "resize", w, h, hz: targetFps() } : { t: "resize", w, h });
+}
+
+// Frecuencia adaptativa: si el decodificador acumula cola (la visible o la
+// interna de MediaCodec, que se nota en que tarda más de dos frames en
+// devolver cada uno) o tiene que resincronizar, se pide la siguiente
+// frecuencia más baja (90 → 75 → 60…).
+// Tras un minuto limpio se vuelve a probar una más alta; si vuelve a fallar
+// en seguida, ésa queda descartada para esta sesión.
+const adapt = { clean: 0, raisedAt: 0, banned: new Set() };
+function adaptFps(maxQueue, resyncs, decodeMs) {
+  const cur = targetFps();
+  if (maxQueue >= 4 || resyncs > 0 || decodeMs > Math.max(20, 2000 / cur)) {
+    if (performance.now() - adapt.raisedAt < 15000) adapt.banned.add(cur);
+    const lower = RATES.find((r) => r < cur - 1);
+    if (lower) { fpsCap = lower; adapt.clean = 0; sendSize(); console.info("encaje: decodificador saturado, " + lower + " fps"); }
+    return;
+  }
+  if (maxQueue <= 1 && decodeMs < 1000 / cur && ++adapt.clean >= 30 && fpsCap < (hz || 60)) {
+    const higher = [...RATES].reverse().find((r) => r > cur + 1 && r <= (hz || 60) + 1 && !adapt.banned.has(r));
+    adapt.clean = 0;
+    if (higher) { fpsCap = higher >= (hz || 60) - 1 ? Infinity : higher; adapt.raisedAt = performance.now(); sendSize(); }
+  }
 }
 let resizeTimer = null;
 window.addEventListener("resize", () => {
   // Con el teclado virtual abierto la ventana encoge: no es un cambio de pantalla.
   if (document.activeElement && document.activeElement.id === "kbd") return;
-  clearTimeout(resizeTimer); resizeTimer = setTimeout(sendSize, 400);
+  clearTimeout(resizeTimer); resizeTimer = setTimeout(() => { sendSize(); remeasureHz(); }, 400);
 });
 
 function setScale(v) {
@@ -295,11 +383,18 @@ screenEl.addEventListener("pointerdown", (e) => {
   else { send({ t: "move", ...p }); send({ t: "button", b: e.button, down: true }); }
   e.preventDefault();
 });
+// Ratón: pointerrawupdate llega en cuanto se mueve, sin esperar al siguiente
+// fotograma de la página como pointermove (unos ms menos de retraso).
+const rawPointer = "onpointerrawupdate" in window;
+if (rawPointer) screenEl.addEventListener("pointerrawupdate", (e) => {
+  if (e.pointerType === "touch") return;
+  const p = norm(e); if (p) send({ t: "move", ...p });
+});
 screenEl.addEventListener("pointermove", (e) => {
   const p = norm(e); if (!p) return;
   if (e.pointerType === "touch") {
     if (touchSlots.has(e.pointerId)) send({ t: "touch_move", id: touchSlots.get(e.pointerId), ...p });
-  } else send({ t: "move", ...p });
+  } else if (!rawPointer) send({ t: "move", ...p });
 });
 const pointerEnd = (e) => {
   if (e.pointerType === "touch") {
@@ -369,7 +464,8 @@ $("menu").onclick = (e) => {
 setInterval(() => {
   const now = performance.now(), dt = (now - stats.last) / 1000;
   const vw = mode === "ws" ? canvas.width : video.videoWidth, vh = mode === "ws" ? canvas.height : video.videoHeight;
-  $("stats").textContent = `${mode} · ${vw}×${vh} · ${(stats.frames / dt).toFixed(0)} fps · ${(stats.bytes * 8 / dt / 1e6).toFixed(1)} Mbit/s`;
+  $("stats").textContent = `${mode} · ${vw}×${vh} · ${(stats.frames / dt).toFixed(0)} fps / ${hz.toFixed(0)} Hz · ${(stats.bytes * 8 / dt / 1e6).toFixed(1)} Mbit/s` +
+    (stats.decodeMs ? ` · decodificar ${stats.decodeMs.toFixed(1)} ms` : "");
   if (mode === "ws") { stats.frames = 0; stats.bytes = 0; }
   stats.last = now;
 }, 1000);

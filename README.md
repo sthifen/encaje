@@ -77,7 +77,26 @@ directamente, con su registro a la vista. Opciones por defecto (ver
 ```
 
 Requisitos: GNOME o KDE Plasma 6 sobre Wayland, con PipeWire y GStreamer
-(vienen de serie).
+(vienen de serie). Funciona en cualquier distro con glibc 2.34 o más nueva:
+Zorin OS 17, Ubuntu 22.04+, Linux Mint 21+, Pop!_OS 22.04, Debian 12,
+Fedora, Arch, openSUSE…
+
+### Si algo falla: informe de error
+
+En la ventana de Encaje, el tercer botón redondo (arriba a la izquierda)
+genera un **informe de error**; se pone naranja si el servidor no consigue
+arrancar. Desde una terminal:
+
+```bash
+encaje --diagnostico      # o: ./Encaje-x86_64.AppImage --diagnostico
+```
+
+El informe (`~/.local/state/encaje/informe-*.md`) recoge la distro, el
+escritorio y la sesión, las versiones de glibc, GTK, GStreamer y PipeWire,
+si el compositor ofrece las APIs que usa Encaje, los codificadores, la GPU,
+los móviles conectados y el final del registro
+(`~/.local/state/encaje/encaje.log`). Se abre una incidencia en GitHub ya
+rellenada: sólo falta contar qué pasó y arrastrar el archivo.
 Para codificar con la GPU NVIDIA hace falta el plugin `nvcodec` de
 `gstreamer1-plugins-bad`; si no está, se usa la CPU.
 
@@ -192,15 +211,39 @@ guarda en cada dispositivo. Si se conectan varios a la vez, manda el último.
 | Opción | Por defecto | |
 |---|---|---|
 | `--width`, `--height` | automática | Fija la resolución e ignora la de los visores. |
-| `--fps` | 60 | Límite de fotogramas por segundo. |
+| `--fps` | automática | Fija los fotogramas por segundo. Sin ella se usa la frecuencia de la pantalla del visor (60, 90, 120 Hz…), y baja sola si su decodificador no da abasto. |
+| `--max-fps` | 120 | Máximo cuando la frecuencia es automática. |
 | `--bitrate` | 12000 | kbit/s. |
 | `--encoder` | `auto` | `nvenc`, `vaapi`, `openh264`. `auto` prueba el hardware y usa la CPU si falla. |
 | `--port` | 8787 | Puerto HTTP. |
 | `--no-usb` | | No ejecutar `adb reverse`. |
 | `--input-only` | | Sólo ratón y teclado; ver [arriba](#sólo-ratón-y-teclado---input-only). |
+| `--diagnostico` | | Informe para reportar un fallo; ver [arriba](#si-algo-falla-informe-de-error). |
 
 `RUST_LOG=debug` muestra más detalle. Cada 5 s se registran los fps de
-captura y envío, el coste de codificar y la edad del frame.
+captura y envío, el coste de codificar y la edad del frame, y lo que mide el
+visor: cuánto tarda en decodificar y dibujar, la cola del decodificador y las
+resincronizaciones (también en el menú ⋮ del visor).
+
+### Fluidez en tablets modestas
+
+El visor mide la frecuencia de su pantalla y el PC transmite a ese ritmo; la
+app de Android pide además el modo de pantalla con más hercios (muchas
+tablets dejan las apps a 60 Hz si no). Si el decodificador de la tablet no
+da abasto (se nota en que tarda más de dos frames en devolver cada uno), el
+visor pide la siguiente frecuencia más baja (90 → 75 → 60…) y, pasado un
+minuto, vuelve a probar. Medido en una Lenovo Tab M11 (MediaTek, 90 Hz,
+decodificando en el WebView):
+
+| | Retraso al decodificar | Cola | Resincronizaciones |
+|---|---|---|---|
+| 90 fps forzados | 110–135 ms | 14–15 frames | 4–5 cada 5 s |
+| Automático (se queda en 60) | ~14,5 ms | 0 | 0 |
+
+Además el servidor desactiva Nagle (`TCP_NODELAY`) en todas las conexiones,
+agrupa las peticiones de keyframe (como mucho una cada 250 ms, aunque entren
+y salgan visores sin parar) y añade al SPS de NVENC `max_num_reorder_frames
+= 0`, para que los decodificadores que lo respetan no retengan frames.
 
 ## Rendimiento medido (2340×1080, GTX 1650 + i7 Alder Lake)
 
@@ -210,6 +253,23 @@ captura y envío, el coste de codificar y la edad del frame.
 | OpenH264 (CPU) | 30–80 ms | 10–20 |
 
 OpenH264 sólo es razonable hasta ~1280×720.
+
+A 2340×1080 y 90 fps con NVENC: 89,3 fps enviados, ~7–8 ms desde que llega
+el frame hasta tenerlo codificado, intervalo entre frames 11,3 ms de mediana
+y 14,4 ms en el p99.
+
+## Pruebas
+
+```bash
+cargo test
+# Estrés sin escritorio: imagen sintética + visores, visores lentos,
+# reconexiones sin parar e inundación de entrada (con basura); falla si el
+# servidor muere, crece la memoria o los hilos.
+tests/stress/run-local.sh target/release/encaje 60 --fps 90 --width 2340 --height 1080
+# El binario de los paquetes (compilado en Ubuntu 22.04) en Ubuntu 22.04 y
+# 24.04, Debian 12, Fedora, Arch y openSUSE, con podman o docker:
+packaging/compat/build.sh && tests/distros/run.sh 30
+```
 
 ## Estructura
 
@@ -222,6 +282,10 @@ OpenH264 sólo es razonable hasta ~1280×720.
 | `src/backend/layout.rs` | Común: pantalla vecina y posición guardada de la tablet. |
 | `src/capture.rs` | Consumidor PipeWire; deja sólo el frame más reciente. |
 | `src/encoder.rs` | Backends H.264, keyframes bajo demanda, estadísticas. |
+| `src/h264.rs` | Reescribe el SPS para que el decodificador no retenga frames. |
+| `src/diagnose.rs` | Registro en `~/.local/state/encaje/` e informe de error. |
+| `packaging/compat/` | Contenedor de compilación (Ubuntu 22.04) para los paquetes. |
+| `tests/` | Pruebas de estrés y de distros. |
 | `src/server.rs` | HTTP (axum): visor, `/offer` WebRTC, `/ws/video`, `/ws/input`. |
 | `src/rtc_peer.rs` | Un `PeerConnection` (webrtc-rs) por visor, sin trickle ICE. |
 | `src/adb.rs` | Modo USB (`adb reverse` automático). |

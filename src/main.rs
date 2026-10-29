@@ -11,10 +11,12 @@ mod adb;
 mod backend;
 mod capture;
 mod clipboard;
+mod diagnose;
 mod encoder;
 mod events;
 mod grab_window;
 mod gui;
+mod h264;
 mod input_only;
 mod overlay;
 mod rtc_peer;
@@ -37,9 +39,13 @@ struct Args {
     /// Alto fijo del monitor virtual
     #[arg(long, requires = "width")]
     height: Option<u32>,
-    /// Fotogramas por segundo
-    #[arg(long, default_value_t = 60)]
-    fps: u32,
+    /// Fotogramas por segundo fijos. Sin --fps se usa la frecuencia de la
+    /// pantalla del visor (60, 90, 120 Hz…), hasta --max-fps
+    #[arg(long)]
+    fps: Option<u32>,
+    /// Máximo de fotogramas por segundo cuando siguen al visor
+    #[arg(long, default_value_t = 120)]
+    max_fps: u32,
     /// Bitrate máximo en kbit/s (baja solo si la red no da para más)
     #[arg(long, default_value_t = 12000)]
     bitrate: u32,
@@ -62,6 +68,14 @@ struct Args {
     /// Ventana para elegir el modo (la usa el acceso directo del menú)
     #[arg(long)]
     gui: bool,
+    /// Escribe un informe para reportar un fallo (sistema, escritorio,
+    /// codificadores, registro) y muestra el enlace para enviarlo
+    #[arg(long, visible_alias = "diagnose")]
+    diagnostico: bool,
+    /// Sin escritorio: transmite una imagen sintética (pruebas de estrés y
+    /// de rendimiento en contenedores)
+    #[arg(long, visible_alias = "test-source", hide = true)]
+    fuente_prueba: bool,
     /// Escribir eventos en JSON para la interfaz (líneas que empiezan por @)
     #[arg(long, hide = true)]
     events: bool,
@@ -73,14 +87,36 @@ struct Args {
 fn main() -> Result<()> {
     // RUST_LOG permite más detalle, p. ej. RUST_LOG=debug. El registro va a
     // stderr: stdout queda para los eventos de la interfaz.
+    //
+    // Además, todo se añade a ~/.local/state/encaje/encaje.log: desde el menú
+    // de aplicaciones nadie ve stderr, y es lo que lleva `--diagnostico`.
+    let args = Args::parse();
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| "error,encaje=info".into());
-    tracing_subscriber::fmt()
-        .with_target(false)
-        .with_env_filter(filter)
-        .with_writer(std::io::stderr)
+    // Las pruebas (`--fuente-prueba`) no ensucian el registro de verdad.
+    let file = (!args.fuente_prueba).then(diagnose::open_log).flatten().map(|f| {
+        tracing_subscriber::fmt::layer()
+            .with_ansi(false)
+            .with_thread_names(true)
+            .with_writer(std::sync::Mutex::new(f))
+    });
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(tracing_subscriber::fmt::layer().with_target(false).with_writer(std::io::stderr))
+        .with(file)
         .init();
-    let args = Args::parse();
+    diagnose::install_panic_hook();
+    if args.diagnostico {
+        return diagnose::run_cli();
+    }
+    tracing::info!(
+        "Encaje {} ({}) pid {}",
+        env!("CARGO_PKG_VERSION"),
+        std::env::args().skip(1).collect::<Vec<_>>().join(" "),
+        std::process::id()
+    );
     // La interfaz y la animación usan su propio bucle (GTK / X11), sin tokio.
     if args.gui {
         return gui::run();
@@ -97,6 +133,7 @@ fn main() -> Result<()> {
     let code = match &result {
         Ok(()) => 0,
         Err(e) => {
+            tracing::error!("{e:#}");
             eprintln!("Error: {e:?}");
             1
         }
@@ -111,6 +148,8 @@ async fn serve(args: Args) -> Result<()> {
     }
     let fixed = args.width.zip(args.height).map(|(w, h)| (w & !1, h & !1));
     let (width, height) = fixed.unwrap_or((1920, 1080));
+    // Hasta que un visor diga su frecuencia, 60.
+    let fps = args.fps.unwrap_or(60.min(args.max_fps)).clamp(1, 240);
 
     if args.input_only {
         let env = backend::Environment::detect();
@@ -126,12 +165,20 @@ async fn serve(args: Args) -> Result<()> {
     let env = backend::Environment::detect();
     tracing::info!("sesión: {} / escritorio: {}", env.session_type, env.desktop);
 
-    let display: Arc<dyn backend::VirtualDisplay> = backend::create(&env, width, height).await?.into();
+    let display: Arc<dyn backend::VirtualDisplay> = if args.fuente_prueba {
+        Arc::new(backend::test::TestDisplay::new())
+    } else {
+        backend::create(&env, width, height).await?.into()
+    };
     events::set_monitor(display.placed());
 
     // Captura → codificador (hilos nativos) → broadcast a clientes (tokio).
     let slot = Arc::new(capture::FrameSlot::default());
-    let capture = capture::spawn(display.node_id(), width, height, args.fps, display.capture_follows_output(), slot.clone(), true);
+    let capture = if args.fuente_prueba {
+        capture::spawn_test(width, height, fps, slot.clone())
+    } else {
+        capture::spawn(display.node_id(), width, height, fps, display.capture_follows_output(), slot.clone(), true)
+    };
     let (frames_tx, _) = broadcast::channel(8);
     let keyreq = encoder::KeyframeRequest::default();
     let rate = encoder::BitrateControl::new(args.bitrate);
@@ -141,7 +188,7 @@ async fn serve(args: Args) -> Result<()> {
         keyreq.clone(),
         encoder::EncoderSettings {
             kind: args.encoder,
-            fps: args.fps,
+            fps: capture.fps.clone(),
             bitrate_kbps: args.bitrate,
             rate: rate.clone(),
         },
@@ -171,7 +218,7 @@ async fn serve(args: Args) -> Result<()> {
         capture,
         display: display.clone(),
         auto_size: fixed.is_none(),
-        fps: args.fps,
+        auto_fps: args.fps.is_none().then_some(args.max_fps),
     };
     tracing::info!("visor en http://{addr} (WiFi: usa la IP de este equipo)");
 

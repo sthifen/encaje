@@ -11,7 +11,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -50,7 +50,9 @@ pub enum EncoderKind {
 #[derive(Clone)]
 pub struct EncoderSettings {
     pub kind: EncoderKind,
-    pub fps: u32,
+    /// Frecuencia actual (la de la tablet si no se fijó `--fps`); compartida
+    /// con la captura, ver [`crate::capture::Capture::set_fps`].
+    pub fps: Arc<AtomicU32>,
     /// Bitrate actual; lo ajusta [`BitrateControl`] según la red.
     pub bitrate_kbps: u32,
     pub rate: Arc<BitrateControl>,
@@ -61,7 +63,11 @@ impl EncoderSettings {
     /// a destiempo es un pico enorme en un enlace lento. Los visores WebRTC
     /// piden keyframes ellos mismos (ver `rtc_peer.rs`).
     fn gop(&self) -> u32 {
-        self.fps * 600
+        self.fps() * 600
+    }
+
+    fn fps(&self) -> u32 {
+        self.fps.load(Ordering::Relaxed).max(1)
     }
 }
 
@@ -140,10 +146,19 @@ struct Output {
     frames: Arc<AtomicU64>,
     bytes: Arc<AtomicU64>,
     keyframes: Arc<AtomicU64>,
+    /// Inicio de la sesión (origen de los pts) y suma de pts→salida en µs:
+    /// lo que tarda de verdad el codificador, también el asíncrono (NVENC).
+    start: Instant,
+    latency_us: Arc<AtomicU64>,
 }
 
 impl Output {
     fn emit(&self, data: Vec<u8>, keyframe: bool, pts: Duration) {
+        // Que el decodificador del visor entregue cada frame en cuanto lo
+        // tiene (ver `h264.rs`). El SPS sólo viaja en los keyframes.
+        let data = if keyframe { crate::h264::patch_access_unit(&data).unwrap_or(data) } else { data };
+        let lat = self.start.elapsed().saturating_sub(pts);
+        self.latency_us.fetch_add(lat.as_micros() as u64, Ordering::Relaxed);
         self.frames.fetch_add(1, Ordering::Relaxed);
         self.bytes.fetch_add(data.len() as u64, Ordering::Relaxed);
         if keyframe {
@@ -159,7 +174,8 @@ impl Output {
 
 trait Backend {
     fn name(&self) -> &'static str;
-    fn matches(&self, f: &RawFrame) -> bool;
+    /// Si sirve para este frame a esta frecuencia (si no, se recrea).
+    fn matches(&self, f: &RawFrame, fps: u32) -> bool;
     /// Envía el frame al codificador. `false` si se descartó y hay que reintentar.
     fn encode(&mut self, f: &RawFrame, force_key: bool, pts: Duration) -> Result<bool>;
     /// Cambia el bitrate sin reiniciar. `false` si el backend no lo admite.
@@ -173,6 +189,7 @@ trait Backend {
 struct OpenH264Backend {
     enc: Encoder,
     size: (usize, usize),
+    fps: u32,
     out: Output,
 }
 
@@ -185,12 +202,12 @@ impl OpenH264Backend {
             .background_detection(false)
             .rate_control_mode(RateControlMode::Bitrate)
             .bitrate(BitRate::from_bps(s.bitrate_kbps * 1000))
-            .max_frame_rate(FrameRate::from_hz(s.fps as f32))
+            .max_frame_rate(FrameRate::from_hz(s.fps() as f32))
             .intra_frame_period(IntraFramePeriod::from_num_frames(s.gop()))
             // Sin skip, OpenH264 ignora el bitrate objetivo.
             .skip_frames(true);
         let enc = Encoder::with_api_config(OpenH264API::from_source(), cfg)?;
-        Ok(Self { enc, size: (w, h), out })
+        Ok(Self { enc, size: (w, h), fps: s.fps(), out })
     }
 }
 
@@ -199,8 +216,8 @@ impl Backend for OpenH264Backend {
         "OpenH264 (CPU)"
     }
 
-    fn matches(&self, f: &RawFrame) -> bool {
-        self.size == (f.width, f.height)
+    fn matches(&self, f: &RawFrame, fps: u32) -> bool {
+        self.size == (f.width, f.height) && self.fps == fps
     }
 
     fn encode(&mut self, f: &RawFrame, force_key: bool, pts: Duration) -> Result<bool> {
@@ -234,13 +251,14 @@ struct GstBackend {
     nvenc: Option<gst::Element>,
     vbv: u32,
     size: (usize, usize),
+    fps: u32,
     order: PixelOrder,
 }
 
 impl GstBackend {
     fn new(kind: EncoderKind, s: &EncoderSettings, f: &RawFrame, out: Output) -> Result<Self> {
         gst::init()?;
-        let (w, h, fps, kbps, gop) = (f.width, f.height, s.fps, s.bitrate_kbps, s.gop());
+        let (w, h, fps, kbps, gop) = (f.width, f.height, s.fps(), s.bitrate_kbps, s.gop());
         let vbv = vbv_kbits(kbps);
         let va_gop = gop.min(1024);
         // Cola de 2 frames que descarta los más viejos si la GPU se atrasa.
@@ -289,6 +307,10 @@ impl GstBackend {
 
         let got_key = Arc::new(AtomicBool::new(false));
         let got_key_cb = got_key.clone();
+        // Algunos codificadores desplazan los pts de salida (p. ej. +1000 h
+        // para que el DTS no sea negativo). El primer frame que sale es el de
+        // prueba, con pts 0: lo que traiga es el desfase.
+        let mut pts_offset: Option<Duration> = None;
         sink.set_callbacks(
             gst_app::AppSinkCallbacks::builder()
                 .new_sample(move |sink| {
@@ -296,7 +318,8 @@ impl GstBackend {
                     let Some(buf) = sample.buffer() else { return Ok(gst::FlowSuccess::Ok) };
                     let map = buf.map_readable().map_err(|_| gst::FlowError::Error)?;
                     let key = !buf.flags().contains(gst::BufferFlags::DELTA_UNIT);
-                    let pts = Duration::from_nanos(buf.pts().map_or(0, |t| t.nseconds()));
+                    let raw = Duration::from_nanos(buf.pts().map_or(0, |t| t.nseconds()));
+                    let pts = raw.saturating_sub(*pts_offset.get_or_insert(raw));
                     if key {
                         got_key_cb.store(true, Ordering::Relaxed);
                     }
@@ -308,7 +331,7 @@ impl GstBackend {
         pipeline.set_state(gst::State::Playing)?;
 
         let nvenc = pipeline.by_name("enc");
-        let mut me = Self { name, pipeline, src, nvenc, vbv, size: (w, h), order: f.order };
+        let mut me = Self { name, pipeline, src, nvenc, vbv, size: (w, h), fps, order: f.order };
         // Prueba real: el pipeline debe producir un keyframe con este frame.
         me.encode(f, true, Duration::ZERO)?;
         let deadline = Instant::now() + Duration::from_secs(3);
@@ -338,8 +361,8 @@ impl Backend for GstBackend {
         self.name
     }
 
-    fn matches(&self, f: &RawFrame) -> bool {
-        self.size == (f.width, f.height) && self.order == f.order
+    fn matches(&self, f: &RawFrame, fps: u32) -> bool {
+        self.size == (f.width, f.height) && self.order == f.order && self.fps == fps
     }
 
     fn set_bitrate(&mut self, kbps: u32) -> bool {
@@ -363,6 +386,7 @@ impl Backend for GstBackend {
                 .build();
             self.src.send_event(ev);
         }
+        // `Bytes`: se comparte el frame, sin copiarlo.
         let mut buf = gst::Buffer::from_slice(f.data.clone());
         buf.get_mut()
             .expect("búfer recién creado")
@@ -379,6 +403,9 @@ impl Drop for GstBackend {
         let _ = self.pipeline.set_state(gst::State::Null);
     }
 }
+
+/// Separación mínima entre keyframes pedidos por los visores.
+const MIN_KEY_INTERVAL: Duration = Duration::from_millis(250);
 
 /// Búfer VBV de ~250 ms: acota el tamaño de cada frame (incluidos los IDR)
 /// para que un keyframe no bloquee un enlace lento durante medio segundo.
@@ -446,20 +473,32 @@ fn run(
         frames: Arc::default(),
         bytes: Arc::default(),
         keyframes: Arc::default(),
+        start,
+        latency_us: Arc::default(),
     };
     let mut stats = Stats::new(&out);
     // Mutter entrega frames al ritmo del compositor (p. ej. 60 Hz) y sólo
     // cuando hay cambios. Se limita a `fps` sin perder nunca el último frame:
     // si llega uno demasiado pronto queda pendiente y se codifica al vencer
     // el intervalo.
-    let interval = Duration::from_secs_f64(1.0 / settings.fps.max(1) as f64);
+    let mut fps = settings.fps();
+    let mut interval = Duration::from_secs_f64(1.0 / fps as f64);
     let mut last_encode = Instant::now() - interval;
     let mut pending = false;
     let mut last_rate_change = Instant::now();
+    let mut last_key = Instant::now() - MIN_KEY_INTERVAL;
 
     loop {
+        if settings.fps() != fps {
+            fps = settings.fps();
+            interval = Duration::from_secs_f64(1.0 / fps as f64);
+            tracing::info!("codificando a {fps} fps");
+        }
+        let key_allowed = last_key.elapsed() >= MIN_KEY_INTERVAL;
         let wait = if pending {
             interval.saturating_sub(last_encode.elapsed())
+        } else if keyreq.pending() && !key_allowed {
+            MIN_KEY_INTERVAL.saturating_sub(last_key.elapsed())
         } else {
             Duration::from_millis(100)
         };
@@ -470,7 +509,8 @@ fn run(
         // Si un cliente pide keyframe con la pantalla quieta, se recodifica
         // el último frame.
         let due = pending && last_encode.elapsed() >= interval;
-        if !due && !keyreq.pending() {
+        let key_allowed = last_key.elapsed() >= MIN_KEY_INTERVAL;
+        if !due && !(keyreq.pending() && key_allowed) {
             continue;
         }
         let Some(frame) = last.as_ref() else { continue };
@@ -483,7 +523,7 @@ fn run(
             continue;
         }
 
-        if !backend.as_ref().is_some_and(|b| b.matches(frame)) {
+        if !backend.as_ref().is_some_and(|b| b.matches(frame, fps)) {
             drop(backend.take()); // liberar la GPU antes de crear otro
             backend = Some(create_backend(&settings, frame, &out)?);
             keyreq.request();
@@ -506,7 +546,12 @@ fn run(
         }
         let enc = backend.as_mut().unwrap();
 
-        let forced = keyreq.take();
+        // Las peticiones de keyframe se agrupan: un visor que entra y sale sin
+        // parar (o varios a la vez) no convierte todos los frames en IDR.
+        let forced = key_allowed && keyreq.take();
+        if forced {
+            last_key = Instant::now();
+        }
         let pts = start.elapsed();
         let t_encode = Instant::now();
         let sent = match enc.encode(frame, forced, pts) {
@@ -520,7 +565,9 @@ fn run(
             }
             Err(e) => return Err(e),
         };
-        last_encode = Instant::now();
+        // El intervalo cuenta desde que empezó a codificar: si no, lo que
+        // tarda la CPU (OpenH264) se sumaría a cada intervalo.
+        last_encode = t_encode;
         stats.encode_us += t_encode.elapsed().as_micros() as u64;
         stats.calls += 1;
         if !sent {
@@ -542,6 +589,7 @@ struct Stats {
     copy0: u64,
     frames0: u64,
     bytes0: u64,
+    latency0: u64,
     calls: u64,
     encode_us: u64,
 }
@@ -554,6 +602,7 @@ impl Stats {
             copy0: capture::COPY_US.load(Ordering::Relaxed),
             frames0: out.frames.load(Ordering::Relaxed),
             bytes0: out.bytes.load(Ordering::Relaxed),
+            latency0: out.latency_us.load(Ordering::Relaxed),
             calls: 0,
             encode_us: 0,
         }
@@ -568,13 +617,15 @@ impl Stats {
         let copy = capture::COPY_US.load(Ordering::Relaxed) - self.copy0;
         let frames = out.frames.load(Ordering::Relaxed) - self.frames0;
         let bytes = out.bytes.load(Ordering::Relaxed) - self.bytes0;
+        let latency = out.latency_us.load(Ordering::Relaxed) - self.latency0;
         tracing::info!(
-            "captura {:.1} fps (copia {:.1} ms) → envío {:.1} fps (codificar {:.1} ms), \
-             {:.2} Mbit/s, {} keyframes, edad del frame {:.1} ms",
+            "captura {:.1} fps (copia {:.1} ms) → envío {:.1} fps (codificar {:.1} ms, \
+             listo en {:.1} ms), {:.2} Mbit/s, {} keyframes, edad del frame {:.1} ms",
             captured as f64 / secs,
             copy as f64 / captured.max(1) as f64 / 1000.0,
             frames as f64 / secs,
             self.encode_us as f64 / self.calls.max(1) as f64 / 1000.0,
+            latency as f64 / frames.max(1) as f64 / 1000.0,
             bytes as f64 * 8.0 / secs / 1e6,
             out.keyframes.load(Ordering::Relaxed),
             captured_at.elapsed().as_secs_f64() * 1000.0,

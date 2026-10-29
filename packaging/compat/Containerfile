@@ -1,0 +1,27 @@
+# Entorno de compilación para los paquetes publicados: Ubuntu 22.04 (glibc
+# 2.35, GTK 4.6, PipeWire 0.3.48, GStreamer 1.20). Un binario enlazado aquí
+# arranca en esa base y en cualquier distro más nueva (Zorin OS 17, Ubuntu
+# 22.04+, Mint 21+, Debian 12, Fedora, Arch, openSUSE…); uno compilado en una
+# distro reciente exige su glibc y no arranca en las anteriores.
+#
+# El crate `pipewire` necesita cabeceras de PipeWire ≥ 1.0. Se toman las de
+# Ubuntu 24.04 (SPA son funciones inline, sin ABI propia) y se enlaza con la
+# libpipewire-0.3.so.0 de 22.04; packaging/compat/check-symbols.sh comprueba
+# que el binario no pide nada que esa versión no tenga.
+FROM docker.io/library/ubuntu:24.04 AS pwheaders
+RUN apt-get update && cd /tmp && apt-get download libpipewire-0.3-dev libspa-0.2-dev \
+    && mkdir /pw && for d in *.deb; do dpkg -x "$d" /pw; done
+
+FROM docker.io/library/ubuntu:22.04
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential pkg-config curl ca-certificates clang libclang-dev nasm file \
+      libpipewire-0.3-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+      libgtk-4-dev libx11-dev libxcb1-dev libwayland-dev libxkbcommon-dev \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=pwheaders /pw/usr/include /opt/pw/include
+COPY --from=pwheaders /pw/usr/lib/x86_64-linux-gnu/pkgconfig /opt/pw/pkgconfig
+RUN sed -i 's|^prefix=.*|prefix=/opt/pw|; s|^includedir=.*|includedir=/opt/pw/include|; s|^libdir=.*|libdir=/usr/lib/x86_64-linux-gnu|' /opt/pw/pkgconfig/*.pc
+ENV PKG_CONFIG_PATH=/opt/pw/pkgconfig
+RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+ENV PATH=/root/.cargo/bin:$PATH
