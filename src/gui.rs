@@ -418,7 +418,12 @@ fn supervise(s: &mut State) {
                 let quick = r.started.elapsed() < Duration::from_secs(5);
                 let wanted = s.wanted == Some(r.mode) && r.stopping.is_none();
                 s.running = None;
-                if wanted {
+                if status.code() == Some(crate::memguard::EXIT_CODE) {
+                    // Sin memoria (ver `memguard`): relanzarlo volvería a agotarla.
+                    tracing::warn!("el servidor se detuvo por falta de memoria; no se relanza");
+                    s.wanted = None;
+                    s.status = Status::Off;
+                } else if wanted {
                     // Terminó solo: volver a lanzarlo, más despacio si falla al arrancar.
                     s.failures = if quick { s.failures + 1 } else { 0 };
                     let delay = Duration::from_millis(800 * (1 << s.failures.min(4)) as u64);

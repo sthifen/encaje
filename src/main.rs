@@ -18,6 +18,7 @@ mod grab_window;
 mod gui;
 mod h264;
 mod input_only;
+mod memguard;
 mod overlay;
 mod rtc_peer;
 mod server;
@@ -131,6 +132,7 @@ fn main() -> Result<()> {
     // se bloquea si el codificador sigue en marcha y el proceso no terminaría
     // nunca (la interfaz no podría cambiar de modo).
     let code = match &result {
+        _ if memguard::tripped() => memguard::EXIT_CODE,
         Ok(()) => 0,
         Err(e) => {
             tracing::error!("{e:#}");
@@ -146,6 +148,10 @@ async fn serve(args: Args) -> Result<()> {
     if args.events {
         events::enable();
     }
+    if !args.fuente_prueba {
+        memguard::warn_known_leaks();
+    }
+    memguard::spawn();
     let fixed = args.width.zip(args.height).map(|(w, h)| (w & !1, h & !1));
     let (width, height) = fixed.unwrap_or((1920, 1080));
     // Hasta que un visor diga su frecuencia, 60.
