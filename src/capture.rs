@@ -168,6 +168,62 @@ struct StreamState {
     format: spa::param::video::VideoInfoRaw,
     slot: Arc<FrameSlot>,
     geometry: Arc<Geometry>,
+    /// Búferes DMA-BUF mapeados (PipeWire sólo mapea los de memoria compartida).
+    dmabufs: DmaBufMaps,
+    /// Frames seguidos en que no se pudo mapear el DMA-BUF.
+    map_failures: u32,
+}
+
+/// Fallos seguidos de mmap tolerados antes de renunciar al DMA-BUF. Un EAGAIN
+/// suelto (Mutter rehaciendo los búferes) no basta: la memoria compartida
+/// pierde memoria en Mutter 50, así que sólo se pasa a ella si no hay otra.
+const MAX_MAP_FAILURES: u32 = 30;
+
+/// Mapeos de los DMA-BUF del compositor, por descriptor. Se rehacen al
+/// renegociar el formato (los búferes cambian).
+#[derive(Default)]
+struct DmaBufMaps(std::collections::HashMap<i32, (*mut libc::c_void, usize)>);
+
+impl DmaBufMaps {
+    fn get(&mut self, fd: i32, len: usize) -> std::io::Result<&[u8]> {
+        if !self.0.get(&fd).is_some_and(|&(_, l)| l == len) {
+            self.remove(fd);
+            let ptr = unsafe { libc::mmap(std::ptr::null_mut(), len, libc::PROT_READ, libc::MAP_SHARED, fd, 0) };
+            if ptr == libc::MAP_FAILED {
+                return Err(std::io::Error::last_os_error());
+            }
+            self.0.insert(fd, (ptr, len));
+        }
+        let &(ptr, len) = &self.0[&fd];
+        Ok(unsafe { std::slice::from_raw_parts(ptr as *const u8, len) })
+    }
+
+    fn remove(&mut self, fd: i32) {
+        if let Some((ptr, len)) = self.0.remove(&fd) {
+            unsafe { libc::munmap(ptr, len) };
+        }
+    }
+
+    fn clear(&mut self) {
+        for fd in self.0.keys().copied().collect::<Vec<_>>() {
+            self.remove(fd);
+        }
+    }
+}
+
+impl Drop for DmaBufMaps {
+    fn drop(&mut self) {
+        self.clear();
+    }
+}
+
+/// DMA_BUF_IOCTL_SYNC (linux/dma-buf.h): coherencia de la lectura desde la CPU.
+fn dmabuf_sync(fd: i32, end: bool) {
+    const DMA_BUF_IOCTL_SYNC: libc::c_ulong = 0x4008_6200;
+    const READ: u64 = 1;
+    const END: u64 = 4;
+    let flags: u64 = READ | if end { END } else { 0 };
+    unsafe { libc::ioctl(fd, DMA_BUF_IOCTL_SYNC, &flags) };
 }
 
 /// Lanza el hilo de captura conectado al nodo `node_id`. Si el flujo falla
@@ -273,7 +329,13 @@ fn run(
         },
     )?;
 
-    let state = StreamState { format: Default::default(), slot, geometry };
+    let neg = std::rc::Rc::new(Negotiation {
+        current: std::cell::Cell::new((width, height, fps)),
+        follow,
+        dmabuf: std::cell::Cell::new(std::env::var_os("ENCAJE_SHM").is_none()),
+    });
+    let state = StreamState { format: Default::default(), slot, geometry, dmabufs: DmaBufMaps::default(), map_failures: 0 };
+    let neg_process = neg.clone();
 
     // Si Mutter cierra la sesión el flujo se desconecta: terminar el hilo.
     let quit = mainloop.clone();
@@ -290,6 +352,7 @@ fn run(
             if id != pw::spa::param::ParamType::Format.as_raw() {
                 return;
             }
+            state.dmabufs.clear();
             if state.format.parse(param).is_ok() {
                 let s = state.format.size();
                 state.geometry.set(s.width, s.height);
@@ -303,7 +366,7 @@ fn run(
                 );
             }
         })
-        .process(|stream, state| {
+        .process(move |stream, state| {
             let Some(mut buffer) = stream.dequeue_buffer() else { return };
             let datas = buffer.datas_mut();
             let Some(d) = datas.first_mut() else { return };
@@ -311,10 +374,42 @@ fn run(
                 let c = d.chunk();
                 (c.offset() as usize, c.size() as usize, c.stride())
             };
+            static LOGGED: std::sync::Once = std::sync::Once::new();
+            LOGGED.call_once(|| tracing::info!("búferes de captura: {:?} (tamaño {} B)", d.type_(), size));
             if size == 0 {
                 return; // búfer sin contenido (frame no modificado / sólo metadatos)
             }
-            let Some(bytes) = d.data() else { return };
+            let dmabuf = (d.type_() == spa::buffer::DataType::DmaBuf).then(|| d.fd() as i32);
+            let maxsize = d.as_raw().maxsize as usize;
+            let mapped;
+            let bytes: &[u8] = match (d.data(), dmabuf) {
+                (Some(b), _) => b,
+                (None, Some(fd)) => match state.dmabufs.get(fd, maxsize) {
+                    Ok(b) => {
+                        state.map_failures = 0;
+                        mapped = b;
+                        mapped
+                    }
+                    Err(e) => {
+                        state.map_failures += 1;
+                        let transient = matches!(e.raw_os_error(), Some(libc::EAGAIN | libc::EINTR | libc::ENOMEM));
+                        if transient && state.map_failures < MAX_MAP_FAILURES {
+                            tracing::debug!("mmap del DMA-BUF falló ({e}), se reintenta en el próximo frame");
+                            return;
+                        }
+                        if neg_process.dmabuf.replace(false) {
+                            tracing::warn!(
+                                "no se puede leer el DMA-BUF del compositor (fd {fd}, {maxsize} B: {e}); se pasa a memoria compartida"
+                            );
+                            if let Err(e) = neg_process.offer(stream) {
+                                tracing::warn!("no se pudo renegociar la captura: {e}");
+                            }
+                        }
+                        return;
+                    }
+                },
+                (None, None) => return,
+            };
             let s = state.format.size();
             let (w, h) = (s.width as usize & !1, s.height as usize & !1);
             let stride = if stride > 0 { stride as usize } else { s.width as usize * 4 };
@@ -326,6 +421,9 @@ fn run(
             let captured = Instant::now();
             let src = &bytes[offset..end];
             let row = w * 4;
+            if let Some(fd) = dmabuf {
+                dmabuf_sync(fd, false);
+            }
             let data = if stride == row {
                 Bytes::copy_from_slice(&src[..row * h])
             } else {
@@ -335,14 +433,20 @@ fn run(
                 }
                 v.into()
             };
+            if let Some(fd) = dmabuf {
+                dmabuf_sync(fd, true);
+            }
             CAPTURED.fetch_add(1, Ordering::Relaxed);
             COPY_US.fetch_add(captured.elapsed().as_micros() as u64, Ordering::Relaxed);
             state.slot.put(RawFrame { width: w, height: h, order, data, captured });
         })
         .register()?;
 
-    let format = video_format_pod(width, height, fps, follow)?;
-    let mut params = [Pod::from_bytes(&format).ok_or_else(|| anyhow!("pod inválido"))?];
+    let formats = neg.formats()?;
+    let mut params = formats
+        .iter()
+        .map(|f| Pod::from_bytes(f).ok_or_else(|| anyhow!("pod inválido")))
+        .collect::<Result<Vec<_>>>()?;
     stream.connect(
         spa::utils::Direction::Input,
         Some(node_id),
@@ -351,9 +455,8 @@ fn run(
     )?;
 
     let resizer = stream.clone();
-    let current = std::cell::Cell::new((width, height, fps));
     let _resize = resize_rx.attach(mainloop.loop_(), move |msg| {
-        let (mut w, mut h, mut fps) = current.get();
+        let (mut w, mut h, mut fps) = neg.current.get();
         match msg {
             Renegotiate::Size(nw, nh) => {
                 tracing::info!("cambiando el monitor virtual a {nw}x{nh}");
@@ -364,12 +467,8 @@ fn run(
                 fps = f;
             }
         }
-        current.set((w, h, fps));
-        let r = video_format_pod(w, h, fps, follow).map_err(|e| e.to_string()).and_then(|bytes| {
-            let pod = Pod::from_bytes(&bytes).ok_or("pod inválido")?;
-            resizer.update_params(&mut [pod]).map_err(|e| e.to_string())
-        });
-        if let Err(e) = r {
+        neg.current.set((w, h, fps));
+        if let Err(e) = neg.offer(&resizer) {
             tracing::warn!("no se pudo cambiar la resolución: {e}");
         }
     });
@@ -378,9 +477,43 @@ fn run(
     Ok(())
 }
 
+/// Lo que se pide al compositor; cambia al renegociar.
+struct Negotiation {
+    current: std::cell::Cell<(u32, u32, u32)>,
+    follow: bool,
+    /// Ofrecer DMA-BUF. Mutter 50 pierde un búfer por cada frame que entrega
+    /// en memoria compartida (~8 MB a 1080p): con un fondo animado (Waywallen,
+    /// Hidamari) o un vídeo en el monitor virtual son cientos de MB por
+    /// segundo hasta colgar el equipo. Con DMA-BUF no pasa. Se vuelve a
+    /// memoria compartida si no se puede mapear (o con ENCAJE_SHM=1).
+    dmabuf: std::cell::Cell<bool>,
+}
+
+impl Negotiation {
+    /// Los EnumFormat, por preferencia: DMA-BUF lineal y memoria compartida.
+    fn formats(&self) -> Result<Vec<Vec<u8>>> {
+        let (w, h, fps) = self.current.get();
+        let mut v = Vec::new();
+        if self.dmabuf.get() {
+            v.push(video_format_pod(w, h, fps, self.follow, true)?);
+        }
+        v.push(video_format_pod(w, h, fps, self.follow, false)?);
+        Ok(v)
+    }
+
+    fn offer(&self, stream: &pw::stream::Stream) -> std::result::Result<(), String> {
+        let formats = self.formats().map_err(|e| e.to_string())?;
+        let mut pods = formats
+            .iter()
+            .map(|f| Pod::from_bytes(f).ok_or("pod inválido"))
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        stream.update_params(&mut pods).map_err(|e| e.to_string())
+    }
+}
+
 /// EnumFormat: vídeo crudo de 32 bits. Con tamaño fijo Mutter lo usa como
 /// resolución del monitor virtual; con `follow` se acepta cualquiera.
-fn video_format_pod(width: u32, height: u32, fps: u32, follow: bool) -> Result<Vec<u8>> {
+fn video_format_pod(width: u32, height: u32, fps: u32, follow: bool, dmabuf: bool) -> Result<Vec<u8>> {
     use pw::spa::param::format::{FormatProperties, MediaSubtype, MediaType};
     use pw::spa::utils::Rectangle;
     let size = if follow {
@@ -396,7 +529,7 @@ fn video_format_pod(width: u32, height: u32, fps: u32, follow: bool) -> Result<V
     } else {
         pw::spa::pod::property!(FormatProperties::VideoSize, Rectangle, Rectangle { width, height })
     };
-    let obj = pw::spa::pod::object!(
+    let mut obj = pw::spa::pod::object!(
         pw::spa::utils::SpaTypes::ObjectParamFormat,
         pw::spa::param::ParamType::EnumFormat,
         pw::spa::pod::property!(FormatProperties::MediaType, Id, MediaType::Video),
@@ -430,6 +563,18 @@ fn video_format_pod(width: u32, height: u32, fps: u32, follow: bool) -> Result<V
             pw::spa::utils::Fraction { num: fps, denom: 1 }
         ),
     );
+    if dmabuf {
+        // Sólo el modificador LINEAR: se puede leer desde la CPU tal cual.
+        // MANDATORY | DONT_FIXATE (spa/pod/pod.h).
+        obj.properties.push(pw::spa::pod::Property {
+            key: FormatProperties::VideoModifier.as_raw(),
+            flags: pw::spa::pod::PropertyFlags::from_bits_retain(1 << 3 | 1 << 4),
+            value: pw::spa::pod::Value::Choice(pw::spa::pod::ChoiceValue::Long(pw::spa::utils::Choice(
+                pw::spa::utils::ChoiceFlags::empty(),
+                pw::spa::utils::ChoiceEnum::Enum { default: 0, alternatives: vec![0] },
+            ))),
+        });
+    }
     Ok(pw::spa::pod::serialize::PodSerializer::serialize(
         std::io::Cursor::new(Vec::new()),
         &pw::spa::pod::Value::Object(obj),

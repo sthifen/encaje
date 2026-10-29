@@ -148,9 +148,6 @@ async fn serve(args: Args) -> Result<()> {
     if args.events {
         events::enable();
     }
-    if !args.fuente_prueba {
-        memguard::warn_known_leaks();
-    }
     memguard::spawn();
     let fixed = args.width.zip(args.height).map(|(w, h)| (w & !1, h & !1));
     let (width, height) = fixed.unwrap_or((1920, 1080));
@@ -205,7 +202,21 @@ async fn serve(args: Args) -> Result<()> {
     let d = display.clone();
     let geometry = capture.geometry.clone();
     tokio::spawn(async move {
+        // Mutter aborta (y con él toda la sesión de GNOME) si recibe un
+        // touch_down en un dedo que ya está abajo; pasa si se pierde un
+        // touch_up (reconexión, dos clientes a la vez). Se lleva la cuenta
+        // de los dedos abajo y se descarta o se completa lo que no cuadre.
+        let mut touching = std::collections::HashSet::new();
         while let Some(ev) = input_rx.recv().await {
+            let ev = match ev {
+                backend::InputEvent::TouchDown { id, .. } if !touching.insert(id) => {
+                    let _ = d.inject(backend::InputEvent::TouchUp { id }, geometry.get()).await;
+                    ev
+                }
+                backend::InputEvent::TouchMove { id, .. } if !touching.contains(&id) => continue,
+                backend::InputEvent::TouchUp { id } if !touching.remove(&id) => continue,
+                ev => ev,
+            };
             if let Err(e) = d.inject(ev, geometry.get()).await {
                 tracing::debug!("inyección de entrada falló: {e}");
             }
