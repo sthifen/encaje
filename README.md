@@ -56,7 +56,7 @@ los pida (como krfb); Encaje lo crea al arrancar en
 `~/.local/share/applications/dev.encaje.kwin.desktop`. El tamaño del
 monitor se cambia con `kscreen-doctor`, que viene con Plasma.
 
-En Niri, Encaje enciende un conector DRM libre (`HDMI-A-*` o `DP-*`) en
+En Niri (experimental, aportado por [@Leimsoto](https://github.com/Leimsoto)), Encaje enciende un conector DRM libre (`HDMI-A-*` o `DP-*`) en
 `/sys/class/drm/card*-*/status`, lo publica por D-Bus (`org.gnome.Mutter.ScreenCast`)
 e inyecta la entrada por `/dev/uinput`. Para no necesitar `sudo`, tu usuario debe
 pertenecer a los grupos `video` e `input` y tener esta regla en
@@ -324,6 +324,9 @@ packaging/compat/build.sh && tests/distros/run.sh 30
   X11 (Cinnamon, XFCE) haría falta otro backend en `src/backend/`.
 - KDE: probado con un KWin 6.7 de prueba (sin pantalla), aún no en una
   sesión de Plasma con la tablet.
+- Niri: necesita un conector HDMI/DP libre en la GPU y la regla udev de
+  arriba; el monitor virtual va a 60 Hz y el teclado se traduce con la
+  distribución de EE. UU./España.
 - Sin audio.
 - WebRTC no reacciona a los PLI del navegador; se recupera con el IDR
   periódico (cada 2 s).

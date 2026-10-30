@@ -97,6 +97,8 @@ struct Surface {
     stuck: bool,
     /// Intentos seguidos de recolocarla sin conseguirlo.
     moves: u8,
+    /// Niri: id de la ventana ya puesta a pantalla completa.
+    niri_fullscreen: Option<u64>,
 }
 
 struct App {
@@ -149,7 +151,7 @@ impl App {
         let context = softbuffer::Context::new(window.clone()).map_err(|e| anyhow::anyhow!("{e}"))?;
         let surface = softbuffer::Surface::new(&context, window.clone()).map_err(|e| anyhow::anyhow!("{e}"))?;
         window.request_redraw();
-        self.surface = Some(Surface { window, surface, stuck: false, moves: 0 });
+        self.surface = Some(Surface { window, surface, stuck: false, moves: 0, niri_fullscreen: None });
         self.armed = false;
         Ok(())
     }
@@ -166,7 +168,7 @@ impl App {
             return;
         }
         if std::env::var_os("NIRI_SOCKET").is_some() {
-            place_on_niri(&m);
+            place_on_niri(&m, &mut s.niri_fullscreen);
             return;
         }
         let pos = s.window.outer_position().unwrap_or_default();
@@ -435,7 +437,7 @@ fn hid_usage(code: KeyCode) -> Option<u8> {
 /// En Niri (`xwayland-satellite`), coloca la ventana `"Encaje (tablet)"` a
 /// pantalla completa sobre el monitor virtual sin cambiar el foco del monitor
 /// principal.
-fn place_on_niri(m: &MonRect) {
+fn place_on_niri(m: &MonRect, fullscreened: &mut Option<u64>) {
     use std::process::Command;
     let Ok(win_out) = Command::new("niri").args(["msg", "-j", "windows"]).output() else { return };
     let Ok(ws_out) = Command::new("niri").args(["msg", "-j", "workspaces"]).output() else { return };
@@ -462,12 +464,13 @@ fn place_on_niri(m: &MonRect) {
             .status();
     }
 
-    let size = &win["layout"]["window_size"];
-    let w = size.get(0).and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-    let h = size.get(1).and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-    if (w, h) != (m.w, m.h) {
+    // `fullscreen-window` alterna: una sola vez por ventana. Comparar el
+    // tamaño no basta (con escala o redondeo nunca coincide y la ventana
+    // entraría y saldría de pantalla completa en cada comprobación).
+    if *fullscreened != Some(id) {
         let _ = Command::new("niri")
             .args(["msg", "action", "fullscreen-window", "--id", &id_str])
             .status();
+        *fullscreened = Some(id);
     }
 }

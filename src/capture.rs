@@ -529,6 +529,23 @@ fn video_format_pod(width: u32, height: u32, fps: u32, follow: bool, dmabuf: boo
     } else {
         pw::spa::pod::property!(FormatProperties::VideoSize, Rectangle, Rectangle { width, height })
     };
+    // Como gnome-remote-desktop: frames a ritmo variable (sólo cuando hay
+    // cambios) con un máximo explícito. Con `follow` también se acepta una
+    // frecuencia fija del compositor (Niri ofrece la de su modo CVT, 59,932 Hz).
+    use pw::spa::utils::Fraction;
+    let rate = if follow {
+        pw::spa::pod::property!(
+            FormatProperties::VideoFramerate,
+            Choice,
+            Range,
+            Fraction,
+            Fraction { num: 0, denom: 1 },
+            Fraction { num: 0, denom: 1 },
+            Fraction { num: 240, denom: 1 }
+        )
+    } else {
+        pw::spa::pod::property!(FormatProperties::VideoFramerate, Fraction, Fraction { num: 0, denom: 1 })
+    };
     let mut obj = pw::spa::pod::object!(
         pw::spa::utils::SpaTypes::ObjectParamFormat,
         pw::spa::param::ParamType::EnumFormat,
@@ -546,13 +563,7 @@ fn video_format_pod(width: u32, height: u32, fps: u32, follow: bool, dmabuf: boo
             VideoFormat::RGBA,
         ),
         size,
-        // Como gnome-remote-desktop: frames a ritmo variable (sólo cuando hay
-        // cambios) con un máximo explícito.
-        pw::spa::pod::property!(
-            FormatProperties::VideoFramerate,
-            Fraction,
-            pw::spa::utils::Fraction { num: 0, denom: 1 }
-        ),
+        rate,
         pw::spa::pod::property!(
             FormatProperties::VideoMaxFramerate,
             Choice,

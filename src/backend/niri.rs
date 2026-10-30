@@ -386,6 +386,8 @@ struct RawInputEvent {
 struct UinputDevice {
     file: File,
     active_touch: Option<u32>,
+    /// Shift pulsado por el usuario (el visor lo manda aparte).
+    shift_held: bool,
 }
 
 impl UinputDevice {
@@ -450,7 +452,7 @@ impl UinputDevice {
             }
         }
 
-        Ok(Self { file, active_touch: None })
+        Ok(Self { file, active_touch: None, shift_held: false })
     }
 
     fn write_events(&mut self, events: &[(u16, u16, i32)]) -> Result<()> {
@@ -585,6 +587,20 @@ fn keysym_to_evdev(keysym: u32) -> Option<(u16, bool)> {
         0xffc8 => Some((87, false)),  // F11
         0xffc9 => Some((88, false)),  // F12
         _ => None,
+    }
+}
+
+const KEY_LEFTSHIFT: u16 = 42;
+const KEY_RIGHTSHIFT: u16 = 54;
+
+/// Eventos de una tecla. Si el carácter necesita Shift y el usuario no lo
+/// tiene pulsado, se pulsa y se suelta alrededor; si ya lo tiene, no se toca
+/// (soltarlo cortaría las mayúsculas a mitad de palabra).
+fn key_events(code: u16, shift: bool, down: bool, shift_held: bool) -> Vec<(u16, u16, i32)> {
+    if shift && down && !shift_held {
+        vec![(EV_KEY, KEY_LEFTSHIFT, 1), (EV_KEY, code, 1), (EV_KEY, KEY_LEFTSHIFT, 0)]
+    } else {
+        vec![(EV_KEY, code, down as i32)]
     }
 }
 
@@ -863,11 +879,11 @@ impl VirtualDisplay for NiriDisplay {
             }
             InputEvent::Key { keysym, down } => {
                 if let Some((code, shift)) = keysym_to_evdev(keysym) {
-                    if shift && down {
-                        dev.write_events(&[(EV_KEY, 42, 1), (EV_KEY, code, 1), (EV_KEY, 42, 0)])?;
-                    } else {
-                        dev.write_events(&[(EV_KEY, code, down as i32)])?;
+                    if code == KEY_LEFTSHIFT || code == KEY_RIGHTSHIFT {
+                        dev.shift_held = down;
                     }
+                    let evs = key_events(code, shift, down, dev.shift_held);
+                    dev.write_events(&evs)?;
                 }
             }
         }
@@ -901,5 +917,17 @@ mod tests {
         assert_eq!(keysym_to_evdev(b'a' as u32), Some((30, false)));
         assert_eq!(keysym_to_evdev(b'A' as u32), Some((30, true)));
         assert_eq!(keysym_to_evdev(0xff0d), Some((28, false)));
+    }
+
+    #[test]
+    fn shift_held_by_user_is_not_released() {
+        // «Ab» sin Shift pulsado: se simula alrededor de la A.
+        assert_eq!(
+            key_events(30, true, true, false),
+            vec![(EV_KEY, KEY_LEFTSHIFT, 1), (EV_KEY, 30, 1), (EV_KEY, KEY_LEFTSHIFT, 0)]
+        );
+        // «AB» con Shift mantenido: sólo la tecla.
+        assert_eq!(key_events(48, true, true, true), vec![(EV_KEY, 48, 1)]);
+        assert_eq!(key_events(48, true, false, true), vec![(EV_KEY, 48, 0)]);
     }
 }
