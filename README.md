@@ -20,6 +20,7 @@
 <p align="center">
   <a href="https://github.com/sthifen/encaje/releases/latest"><img src="https://img.shields.io/github/v/release/sthifen/encaje?label=versi%C3%B3n&color=4F8CFF" alt="Última versión" /></a>
   <a href="https://github.com/sthifen/encaje/releases"><img src="https://img.shields.io/github/downloads/sthifen/encaje/total?label=descargas&color=1E3A8A" alt="Descargas" /></a>
+  <a href="https://github.com/sthifen/encaje/releases/latest"><img src="https://img.shields.io/github/downloads/sthifen/encaje/latest/total?label=descargas%20de%20esta%20versi%C3%B3n&color=2563EB" alt="Descargas de la última versión" /></a>
   <a href="https://github.com/sthifen/encaje/stargazers"><img src="https://img.shields.io/github/stars/sthifen/encaje?style=flat&label=estrellas&color=A78BFA" alt="Estrellas" /></a>
 </p>
 
