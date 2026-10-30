@@ -165,6 +165,10 @@ impl App {
             s.stuck = true;
             return;
         }
+        if std::env::var_os("NIRI_SOCKET").is_some() {
+            place_on_niri(&m);
+            return;
+        }
         let pos = s.window.outer_position().unwrap_or_default();
         let size = s.window.inner_size();
         if (pos.x, pos.y, size.width, size.height) == (m.x, m.y, m.w, m.h) {
@@ -426,4 +430,44 @@ fn hid_usage(code: KeyCode) -> Option<u8> {
         ControlRight => 0xE4, ShiftRight => 0xE5, AltRight => 0xE6, SuperRight => 0xE7,
         _ => return None,
     })
+}
+
+/// En Niri (`xwayland-satellite`), coloca la ventana `"Encaje (tablet)"` a
+/// pantalla completa sobre el monitor virtual sin cambiar el foco del monitor
+/// principal.
+fn place_on_niri(m: &MonRect) {
+    use std::process::Command;
+    let Ok(win_out) = Command::new("niri").args(["msg", "-j", "windows"]).output() else { return };
+    let Ok(ws_out) = Command::new("niri").args(["msg", "-j", "workspaces"]).output() else { return };
+    let Ok(windows) = serde_json::from_slice::<Vec<serde_json::Value>>(&win_out.stdout) else { return };
+    let Ok(workspaces) = serde_json::from_slice::<Vec<serde_json::Value>>(&ws_out.stdout) else { return };
+
+    let Some(win) = windows.iter().find(|w| w["title"].as_str() == Some("Encaje (tablet)")) else {
+        return;
+    };
+    let Some(id) = win["id"].as_u64() else { return };
+    let id_str = id.to_string();
+
+    let ws_id = win["workspace_id"].as_u64();
+    let cur_output = ws_id.and_then(|wid| {
+        workspaces
+            .iter()
+            .find(|ws| ws["id"].as_u64() == Some(wid))
+            .and_then(|ws| ws["output"].as_str())
+    });
+
+    if cur_output != Some(m.name.as_str()) {
+        let _ = Command::new("niri")
+            .args(["msg", "action", "move-window-to-monitor", "--id", &id_str, &m.name])
+            .status();
+    }
+
+    let size = &win["layout"]["window_size"];
+    let w = size.get(0).and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+    let h = size.get(1).and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+    if (w, h) != (m.w, m.h) {
+        let _ = Command::new("niri")
+            .args(["msg", "action", "fullscreen-window", "--id", &id_str])
+            .status();
+    }
 }

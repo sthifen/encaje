@@ -4,6 +4,7 @@
 //!
 //! * GNOME (`gnome.rs`): D-Bus privado de Mutter, el de gnome-remote-desktop.
 //! * KDE Plasma (`kde.rs`): protocolos Wayland de KWin, los de krfb.
+//! * Niri (`niri.rs`): conector DRM + D-Bus `ScreenCast` de Niri + `/dev/uinput`.
 //!
 //! El resto (captura, codificación, red, modo sólo entrada) es común.
 
@@ -11,6 +12,7 @@ mod gnome;
 mod kde;
 pub mod layout;
 mod mutter_layout;
+mod niri;
 pub mod test;
 
 use anyhow::{Result, bail};
@@ -33,6 +35,7 @@ pub struct Environment {
 pub enum Desktop {
     Gnome,
     Kde,
+    Niri,
 }
 
 impl Environment {
@@ -46,7 +49,13 @@ impl Environment {
                 "tty".into()
             }
         });
-        let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
+        let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_else(|_| {
+            if std::env::var_os("NIRI_SOCKET").is_some() {
+                "niri".into()
+            } else {
+                String::new()
+            }
+        });
         Self { session_type, desktop }
     }
 
@@ -61,6 +70,8 @@ impl Environment {
             Some(Desktop::Gnome)
         } else if names.iter().any(|d| d == "KDE") {
             Some(Desktop::Kde)
+        } else if names.iter().any(|d| d == "NIRI") {
+            Some(Desktop::Niri)
         } else {
             None
         }
@@ -170,6 +181,7 @@ pub async fn create(env: &Environment, width: u32, height: u32) -> Result<Box<dy
     match env.kind_or_probe().await {
         Some(Desktop::Gnome) => Ok(Box::new(gnome::GnomeDisplay::create(width, height).await?)),
         Some(Desktop::Kde) => Ok(Box::new(kde::KdeDisplay::create(width, height).await?)),
+        Some(Desktop::Niri) => Ok(Box::new(niri::NiriDisplay::create(width, height).await?)),
         None if env.session_type == "x11" => bail!(
             "La sesión es X11 ({:?}). Encaje necesita Wayland: cierra la sesión y, en la \
              pantalla de acceso, elige la sesión con Wayland en el engranaje (en Ubuntu y \
@@ -178,8 +190,8 @@ pub async fn create(env: &Environment, width: u32, height: u32) -> Result<Box<dy
             env.desktop
         ),
         None => bail!(
-            "Sesión detectada: {} / {:?}. Encaje funciona en GNOME y en KDE Plasma, \
-             las dos sobre Wayland. Ejecuta `encaje --diagnostico` y adjunta el informe \
+            "Sesión detectada: {} / {:?}. Encaje funciona en GNOME, KDE Plasma y Niri, \
+             sobre Wayland. Ejecuta `encaje --diagnostico` y adjunta el informe \
              en {}",
             env.session_type,
             env.desktop,
@@ -205,6 +217,7 @@ mod tests {
         assert_eq!(env("wayland", "GNOME").kind(), Some(Desktop::Gnome));
         assert_eq!(env("wayland", "ubuntu:GNOME").kind(), Some(Desktop::Gnome));
         assert_eq!(env("wayland", "KDE").kind(), Some(Desktop::Kde));
+        assert_eq!(env("wayland", "niri").kind(), Some(Desktop::Niri));
         assert_eq!(env("x11", "KDE").kind(), None);
         assert_eq!(env("wayland", "Hyprland").kind(), None);
     }
