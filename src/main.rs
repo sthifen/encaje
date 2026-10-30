@@ -16,6 +16,7 @@ mod encoder;
 mod events;
 mod grab_window;
 mod gui;
+mod guide;
 mod h264;
 mod input_only;
 mod memguard;

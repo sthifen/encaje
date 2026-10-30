@@ -8,6 +8,10 @@
 //! sus eventos para encender la luz de la tarjeta y lanzar la animación de
 //! conexión (`--overlay`) en el borde donde está la tablet.
 //!
+//! La primera vez, en lugar de las tarjetas sale una guía para activar la
+//! depuración USB (ver `guide.rs`), que avanza sola según `adb devices`; el
+//! botón «?» la vuelve a abrir.
+//!
 //! Estilo de cristal: GNOME no deja a las aplicaciones desenfocar lo que hay
 //! detrás de la ventana, así que el "cristal" se dibuja dentro: manchas de
 //! color animadas bajo una capa translúcida, y tarjetas con borde de luz.
@@ -18,13 +22,16 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::rc::Rc;
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use gtk4 as gtk;
 use gtk::prelude::*;
 use gtk::{cairo, gdk, glib};
+
+use crate::guide::{self, Adb, Next};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Mode {
@@ -65,6 +72,15 @@ enum Status {
 
 enum Msg {
     Event(u64, serde_json::Value),
+    Adb(Adb),
+}
+
+/// La guía abierta: el paso que eligió el usuario y lo último que dijo adb.
+struct Guide {
+    manual: usize,
+    adb: Option<Adb>,
+    /// Se abrió sola al arrancar: si la tablet ya está lista, se cierra sola.
+    auto: bool,
 }
 
 struct Running {
@@ -86,6 +102,14 @@ struct State {
     next_id: u64,
     quitting: bool,
     tx: mpsc::Sender<Msg>,
+    guide: Option<Guide>,
+    /// Ya vio (o saltó) la guía; se guarda en gui.json.
+    onboarded: bool,
+    /// Modo que arrancar al cerrar la guía de la primera vez.
+    pending: Option<Mode>,
+    /// El hilo de adb sólo consulta mientras la guía está abierta.
+    polling: Arc<AtomicBool>,
+    install: String,
 }
 
 const CSS: &str = r#"
@@ -137,6 +161,36 @@ button.light.min { background-color: #febc2e; }
 button.light.zoom { background-color: rgba(255,255,255,0.18); }
 button.light.zoom.alert { background-color: #ff9f0a; box-shadow: 0 0 10px rgba(255,159,10,0.8); }
 button.light:hover { filter: brightness(1.15); }
+button.help {
+  min-width: 22px; min-height: 22px; padding: 0; margin-left: 4px;
+  border-radius: 999px; border: 1px solid rgba(255,255,255,0.22);
+  background: rgba(255,255,255,0.08); background-image: none;
+  color: rgba(255,255,255,0.85); font-size: 12px; font-weight: 600;
+}
+.guide { color: #F4F5F8; }
+.guide-label { font-size: 12px; color: #AEB3C2; }
+.guide-num { font-size: 56px; font-weight: 600; color: #00C3E3; }
+.guide-card {
+  border-radius: 22px; background-color: rgba(255,255,255,0.08);
+  border: 1px solid rgba(255,255,255,0.18);
+}
+.guide-title { font-size: 19px; font-weight: 600; }
+.guide-body { font-size: 14px; color: #D3D6DE; }
+.guide-hint { font-size: 12px; color: #AEB3C2; }
+.guide-cmd {
+  font-family: monospace; font-size: 14px; padding: 8px 12px; border-radius: 10px;
+  background-color: rgba(0,0,0,0.30); border: 1px solid rgba(255,255,255,0.14);
+}
+.dot { min-width: 18px; min-height: 4px; border-radius: 999px; background-color: rgba(255,255,255,0.22); }
+.dot.on { min-width: 36px; background-color: #00C3E3; }
+button.primary, button.ghost {
+  min-height: 40px; padding: 0 20px; border-radius: 14px; background-image: none;
+  font-weight: 600; box-shadow: none;
+}
+button.primary { background-color: #00C3E3; color: #0B2A33; border: none; }
+button.primary:hover { background-color: #3DD3EC; }
+button.ghost { background-color: transparent; color: #E6E8EE; border: 1px solid rgba(255,255,255,0.22); }
+button.ghost:hover { background-color: rgba(255,255,255,0.08); }
 "#;
 
 pub fn run() -> Result<()> {
@@ -176,8 +230,14 @@ fn build(app: &gtk::Application) {
         failures: 0,
         next_id: 0,
         quitting: false,
-        tx,
+        tx: tx.clone(),
+        guide: None,
+        onboarded: true,
+        pending: None,
+        polling: Arc::new(AtomicBool::new(false)),
+        install: guide::install_cmd(),
     }));
+    spawn_adb_poller(state.borrow().polling.clone(), tx);
 
     let window = gtk::ApplicationWindow::builder()
         .application(app)
@@ -240,6 +300,15 @@ fn build(app: &gtk::Application) {
         }
         lights.append(&b);
     }
+    let help = gtk::Button::with_label("?");
+    help.add_css_class("help");
+    help.set_valign(gtk::Align::Center);
+    help.set_tooltip_text(Some("Guía de conexión"));
+    {
+        let state = state.clone();
+        help.connect_clicked(move |_| open_guide(&mut state.borrow_mut(), false));
+    }
+    lights.append(&help);
     content.append(&lights);
 
     let cards = gtk::Box::new(gtk::Orientation::Horizontal, 22);
@@ -284,7 +353,13 @@ fn build(app: &gtk::Application) {
         cards.append(&button);
         buttons.push((mode, button, icon));
     }
-    content.append(&cards);
+    let guide_ui = GuideUi::build(&state);
+    let pages = gtk::Stack::new();
+    pages.set_vexpand(true);
+    pages.set_transition_type(gtk::StackTransitionType::Crossfade);
+    pages.add_named(&cards, Some("cards"));
+    pages.add_named(&guide_ui.root, Some("guide"));
+    content.append(&pages);
 
     let handle = gtk::WindowHandle::new();
     handle.set_child(Some(&glass));
@@ -311,8 +386,18 @@ fn build(app: &gtk::Application) {
         let window = window.clone();
         glib::timeout_add_local(Duration::from_millis(33), move || {
             let mut s = state.borrow_mut();
-            while let Ok(Msg::Event(id, ev)) = rx.try_recv() {
-                handle_event(&mut s, id, &ev);
+            while let Ok(msg) = rx.try_recv() {
+                match msg {
+                    Msg::Event(id, ev) => handle_event(&mut s, id, &ev),
+                    Msg::Adb(adb) => on_adb(&mut s, adb),
+                }
+            }
+            match &s.guide {
+                Some(g) => {
+                    guide_ui.render(&guide::step(g.manual, g.adb, &s.install));
+                    pages.set_visible_child_name("guide");
+                }
+                None => pages.set_visible_child_name("cards"),
             }
             supervise(&mut s);
             if s.quitting && s.running.is_none() {
@@ -339,13 +424,211 @@ fn build(app: &gtk::Application) {
         });
     }
 
-    // Arrancar con el último modo usado.
+    // Arrancar con el último modo usado; la primera vez, antes la guía.
     {
         let mut s = state.borrow_mut();
-        let last = load_last_mode();
-        set_wanted(&mut s, last);
+        let (last, onboarded) = load_prefs();
+        s.onboarded = onboarded;
+        if onboarded {
+            set_wanted(&mut s, last);
+        } else {
+            s.pending = last;
+            open_guide(&mut s, true);
+        }
     }
     window.present();
+}
+
+// ---- Guía de la primera vez ----
+
+struct GuideUi {
+    root: gtk::Box,
+    label: gtk::Label,
+    num: gtk::Label,
+    title: gtk::Label,
+    body: gtk::Label,
+    cmd: gtk::Label,
+    hint: gtk::Label,
+    dots: Vec<gtk::Box>,
+    back: gtk::Button,
+    next: gtk::Button,
+    shown: RefCell<Option<guide::Step>>,
+}
+
+impl GuideUi {
+    fn build(state: &Rc<RefCell<State>>) -> Self {
+        let root = gtk::Box::new(gtk::Orientation::Vertical, 14);
+        root.add_css_class("guide");
+        root.set_margin_start(10);
+        root.set_margin_top(4);
+
+        let top = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        let dots: Vec<gtk::Box> = (0..3)
+            .map(|_| {
+                let d = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+                d.add_css_class("dot");
+                d.set_valign(gtk::Align::Center);
+                top.append(&d);
+                d
+            })
+            .collect();
+        let label = gtk::Label::new(None);
+        label.add_css_class("guide-label");
+        label.set_hexpand(true);
+        label.set_xalign(1.0);
+        top.append(&label);
+        root.append(&top);
+
+        let middle = gtk::Box::new(gtk::Orientation::Horizontal, 22);
+        middle.set_vexpand(true);
+        let card = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        card.add_css_class("guide-card");
+        card.set_size_request(118, 150);
+        card.set_valign(gtk::Align::Center);
+        let num = gtk::Label::new(None);
+        num.add_css_class("guide-num");
+        num.set_vexpand(true);
+        card.append(&num);
+        middle.append(&card);
+
+        let text = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        text.set_valign(gtk::Align::Center);
+        text.set_hexpand(true);
+        let new_label = |class: &str| {
+            let l = gtk::Label::new(None);
+            l.add_css_class(class);
+            l.set_xalign(0.0);
+            l.set_wrap(true);
+            l.set_max_width_chars(40);
+            text.append(&l);
+            l
+        };
+        let title = new_label("guide-title");
+        let body = new_label("guide-body");
+        let cmd = new_label("guide-cmd");
+        cmd.set_selectable(true);
+        let hint = new_label("guide-hint");
+        middle.append(&text);
+        root.append(&middle);
+
+        let bottom = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+        let skip = gtk::Button::with_label("Saltar");
+        skip.add_css_class("ghost");
+        bottom.append(&skip);
+        let spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        spacer.set_hexpand(true);
+        bottom.append(&spacer);
+        let back = gtk::Button::with_label("Atrás");
+        back.add_css_class("ghost");
+        bottom.append(&back);
+        let next = gtk::Button::new();
+        next.add_css_class("primary");
+        bottom.append(&next);
+        root.append(&bottom);
+
+        {
+            let state = state.clone();
+            skip.connect_clicked(move |_| close_guide(&mut state.borrow_mut()));
+        }
+        {
+            let state = state.clone();
+            back.connect_clicked(move |_| {
+                if let Some(g) = state.borrow_mut().guide.as_mut() {
+                    g.manual = g.manual.saturating_sub(1);
+                }
+            });
+        }
+        {
+            let state = state.clone();
+            next.connect_clicked(move |_| {
+                let mut s = state.borrow_mut();
+                let Some(g) = s.guide.as_ref() else { return };
+                match guide::step(g.manual, g.adb, &s.install).next {
+                    Next::Go => s.guide.as_mut().unwrap().manual += 1,
+                    Next::Finish => close_guide(&mut s),
+                    Next::Wait => {}
+                }
+            });
+        }
+        Self { root, label, num, title, body, cmd, hint, dots, back, next, shown: RefCell::new(None) }
+    }
+
+    /// Pone el paso en pantalla (sólo si cambió: se llama en cada tic).
+    fn render(&self, step: &guide::Step) {
+        if self.shown.borrow().as_ref() == Some(step) {
+            return;
+        }
+        self.label.set_text(step.label);
+        self.num.set_text(&match step.done {
+            3 => "✓".to_owned(),
+            _ if step.cmd.is_some() => "adb".to_owned(),
+            n => (n + 1).to_string(),
+        });
+        self.title.set_text(step.title);
+        self.body.set_text(step.body);
+        self.cmd.set_visible(step.cmd.is_some());
+        self.cmd.set_text(step.cmd.as_deref().unwrap_or(""));
+        self.hint.set_text(step.hint);
+        // Encendidos: los pasos hechos y el actual (ninguno mientras falta adb).
+        let lit = if step.cmd.is_some() { 0 } else { step.done + 1 };
+        for (i, d) in self.dots.iter().enumerate() {
+            if i < lit {
+                d.add_css_class("on");
+            } else {
+                d.remove_css_class("on");
+            }
+        }
+        self.back.set_visible(step.back);
+        self.next.set_label(match step.next {
+            Next::Finish => "Empezar",
+            _ => "Siguiente",
+        });
+        self.next.set_sensitive(step.next != Next::Wait);
+        *self.shown.borrow_mut() = Some(step.clone());
+    }
+}
+
+fn open_guide(s: &mut State, auto: bool) {
+    s.guide = Some(Guide { manual: 0, adb: None, auto });
+    s.polling.store(true, Ordering::Relaxed);
+}
+
+/// Cerrar la guía (terminada o saltada). La primera vez arranca entonces
+/// el último modo usado, si lo había.
+fn close_guide(s: &mut State) {
+    s.guide = None;
+    s.polling.store(false, Ordering::Relaxed);
+    if !s.onboarded {
+        s.onboarded = true;
+        let pending = s.pending.take();
+        save_prefs(pending, true);
+        if pending.is_some() {
+            set_wanted(s, pending);
+        }
+    }
+}
+
+fn on_adb(s: &mut State, adb: Adb) {
+    let Some(g) = s.guide.as_mut() else { return };
+    // Abierta sola y la tablet ya estaba lista: no hacía falta.
+    let first = g.adb.is_none();
+    g.adb = Some(adb);
+    if g.auto && first && adb == Adb::Ready {
+        close_guide(s);
+    }
+}
+
+/// Consulta `adb devices` cada 2 s mientras la guía está abierta, fuera del
+/// hilo de GTK (adb puede tardar en arrancar su servidor).
+fn spawn_adb_poller(polling: Arc<AtomicBool>, tx: mpsc::Sender<Msg>) {
+    std::thread::spawn(move || {
+        loop {
+            if polling.load(Ordering::Relaxed) && tx.send(Msg::Adb(guide::adb_state())).is_err() {
+                break;
+            }
+            std::thread::sleep(Duration::from_secs(2));
+        }
+    });
 }
 
 // ---- Proceso vigilado ----
@@ -392,7 +675,7 @@ fn stop_strays() {
 fn set_wanted(s: &mut State, mode: Option<Mode>) {
     s.wanted = mode;
     s.failures = 0;
-    save_last_mode(mode);
+    save_prefs(mode, s.onboarded);
     if s.running.as_ref().is_some_and(|r| Some(r.mode) != mode) {
         stop(s);
     }
@@ -552,19 +835,27 @@ fn last_mode_file() -> PathBuf {
     config_dir().join("encaje").join("gui.json")
 }
 
-fn load_last_mode() -> Option<Mode> {
-    let v: serde_json::Value = serde_json::from_slice(&std::fs::read(last_mode_file()).ok()?).ok()?;
-    match v["mode"].as_str()? {
-        "monitor" => Some(Mode::Monitor),
-        "input" => Some(Mode::Input),
-        _ => None,
-    }
+/// Último modo y si ya se vio la guía.
+fn load_prefs() -> (Option<Mode>, bool) {
+    parse_prefs(&std::fs::read(last_mode_file()).unwrap_or_default())
 }
 
-fn save_last_mode(mode: Option<Mode>) {
+fn parse_prefs(raw: &[u8]) -> (Option<Mode>, bool) {
+    let v: serde_json::Value = serde_json::from_slice(raw).unwrap_or_default();
+    let mode = match v["mode"].as_str() {
+        Some("monitor") => Some(Mode::Monitor),
+        Some("input") => Some(Mode::Input),
+        _ => None,
+    };
+    // Un gui.json de antes de la guía con un modo: ya usaba Encaje.
+    let onboarded = v["onboarded"].as_bool().unwrap_or(mode.is_some());
+    (mode, onboarded)
+}
+
+fn save_prefs(mode: Option<Mode>, onboarded: bool) {
     let path = last_mode_file();
     let _ = std::fs::create_dir_all(path.parent().unwrap());
-    let _ = std::fs::write(path, serde_json::json!({ "mode": mode.map(Mode::key) }).to_string());
+    let _ = std::fs::write(path, serde_json::json!({ "mode": mode.map(Mode::key), "onboarded": onboarded }).to_string());
 }
 
 // ---- Dibujo ----
@@ -736,4 +1027,20 @@ fn draw_icon(cr: &cairo::Context, mode: Mode, w: f64, h: f64, t: f64, status: St
     cr.set_source_rgba(lc.0, lc.1, lc.2, 0.6 + 0.4 * pulse);
     cr.arc(x, y, 4.5, 0.0, std::f64::consts::TAU);
     let _ = cr.fill();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prefs_from_older_versions() {
+        // Primera vez: sin archivo.
+        assert_eq!(parse_prefs(b""), (None, false));
+        // gui.json de antes de la guía: quien tenía un modo ya usaba Encaje.
+        assert_eq!(parse_prefs(br#"{"mode":"monitor"}"#), (Some(Mode::Monitor), true));
+        assert_eq!(parse_prefs(br#"{"mode":null}"#), (None, false));
+        assert_eq!(parse_prefs(br#"{"mode":"input","onboarded":false}"#), (Some(Mode::Input), false));
+        assert_eq!(parse_prefs(br#"{"mode":null,"onboarded":true}"#), (None, true));
+    }
 }
