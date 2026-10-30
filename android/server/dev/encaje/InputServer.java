@@ -38,8 +38,7 @@ import java.util.regex.Pattern;
  *
  * Android 16 ignora los ratones HID absolutos, así que el ratón es relativo.
  * Con la aceleración desactivada el puntero avanza una cantidad fija por
- * unidad, y el PC puede llevar la cuenta de dónde está. Donde no se puede
- * desactivar (Android 15 con la curva nueva), se limita la velocidad (Pacer). Una sola sesión por
+ * unidad, y el PC puede llevar la cuenta de dónde está. Una sola sesión por
  * proceso: al cerrarse el socket se destruyen los dispositivos, se restaura
  * la aceleración y el proceso termina.
  */
@@ -83,7 +82,6 @@ public final class InputServer {
 
     private static final String[] savedAccel = new String[ACCEL_SETTINGS.length];
     private static FileDescriptor mouse;
-    private static Pacer pacer;
     private static FileDescriptor keyboard;
 
     private static final int DEV_CLIPBOARD = 2;
@@ -108,10 +106,6 @@ public final class InputServer {
             DataOutputStream out = new DataOutputStream(client.getOutputStream());
             float scale = calibrate();
             System.out.println("escala del puntero: " + scale);
-            if (accelerationStuck()) {
-                pacer = new Pacer();
-                System.out.println("aceleración no desactivable: velocidad limitada a " + Pacer.MAX_SPEED + " u/s");
-            }
             watchDisplay(out, scale);
             watchClipboard(out);
 
@@ -125,8 +119,7 @@ public final class InputServer {
                 }
                 int len = in.readUnsignedByte();
                 in.readFully(report, 0, len);
-                if (dev == 0 && pacer != null && len == 7) pacer.report(report);
-                else input(dev == 0 ? mouse : keyboard, report, len);
+                input(dev == 0 ? mouse : keyboard, report, len);
             }
         } catch (IOException e) {
             // El PC cerró la conexión.
@@ -329,115 +322,6 @@ public final class InputServer {
         ByteBuffer r = ByteBuffer.allocate(7).order(ByteOrder.LITTLE_ENDIAN);
         r.put((byte) 0).putShort((short) dx).putShort((short) dy).put((byte) 0).put((byte) 0);
         input(mouse, r.array(), 7);
-    }
-
-    /**
-     * Android 15 con la curva de aceleración nueva (p. ej. Lenovo Tab M11) no
-     * hace caso de los ajustes de aceleración: la pantalla no aparece en
-     * "Display with Mouse Pointer Acceleration Disabled".
-     */
-    private static boolean accelerationStuck() {
-        String flag = sh("device_config get input com.android.input.flags.enable_new_mouse_pointer_ballistics").trim();
-        return flag.equals("true") && sh("dumpsys input").contains("Display with Mouse Pointer Acceleration Disabled: {}");
-    }
-
-    /**
-     * Limita la velocidad del ratón por debajo del tramo plano de la curva de
-     * aceleración (32 mm/s a 800 cpi ≈ 1000 u/s en AOSP): así el puntero avanza
-     * siempre lo mismo por unidad y el PC sabe dónde está. Lo que llega más
-     * rápido se encola y se suelta a ese ritmo; los botones y la rueda esperan
-     * a que termine el movimiento anterior para caer en su sitio.
-     */
-    static final class Pacer {
-        static final int MAX_SPEED = 850;
-        private static final long TICK_NS = 4_000_000;
-        /** Empujones contra la esquina al entrar: van directos, Android los recorta. */
-        private static final int SLAM = 16384;
-        /** Tras un empujón, que Android olvide esa velocidad (ASSUME_POINTER_STOPPED_TIME es 40 ms). */
-        private static final long SETTLE_NS = 60_000_000;
-
-        private long pendingX, pendingY;
-        private byte buttons;
-        private long holdUntil;
-
-        Pacer() {
-            Thread t = new Thread(this::run, "pacer");
-            t.setDaemon(true);
-            t.start();
-        }
-
-        /** Informe del PC: [botones] [dx i16] [dy i16] [rueda] [rueda horizontal]. */
-        synchronized void report(byte[] r) throws Exception {
-            ByteBuffer b = ByteBuffer.wrap(r, 0, 7).order(ByteOrder.LITTLE_ENDIAN);
-            byte btn = b.get();
-            int dx = b.getShort(), dy = b.getShort();
-            byte wheel = b.get(), pan = b.get();
-            if (Math.abs(dx) >= SLAM || Math.abs(dy) >= SLAM) {
-                drained();
-                send(btn, dx, dy, (byte) 0, (byte) 0);
-                holdUntil = System.nanoTime() + SETTLE_NS;
-                dx = dy = 0;
-            }
-            pendingX += dx;
-            pendingY += dy;
-            if (btn != buttons || wheel != 0 || pan != 0) {
-                drained();
-                buttons = btn;
-                send(btn, 0, 0, wheel, pan);
-            }
-            notifyAll();
-        }
-
-        private void drained() throws InterruptedException {
-            while (pendingX != 0 || pendingY != 0) wait();
-        }
-
-        private void send(byte btn, int dx, int dy, byte wheel, byte pan) throws Exception {
-            ByteBuffer r = ByteBuffer.allocate(7).order(ByteOrder.LITTLE_ENDIAN);
-            r.put(btn).putShort((short) dx).putShort((short) dy).put(wheel).put(pan);
-            input(mouse, r.array(), 7);
-        }
-
-        private synchronized void run() {
-            long last = System.nanoTime();
-            double budget = 0;
-            try {
-                while (true) {
-                    if (pendingX == 0 && pendingY == 0) {
-                        wait();
-                        last = System.nanoTime() - TICK_NS;
-                        budget = 0;
-                        continue;
-                    }
-                    long now = System.nanoTime();
-                    if (now < holdUntil) {
-                        wait(Math.max(1, (holdUntil - now) / 1_000_000));
-                        last = System.nanoTime() - TICK_NS;
-                        continue;
-                    }
-                    if (now - last < TICK_NS) {
-                        wait(1);
-                        continue;
-                    }
-                    // Lo acumulado desde el último envío, sin pasar de dos ticks (no soltar ráfagas).
-                    budget = Math.min(budget + MAX_SPEED * (now - last) / 1e9, MAX_SPEED * 2 * TICK_NS / 1e9);
-                    last = now;
-                    double dist = Math.hypot(pendingX, pendingY);
-                    double f = Math.min(1, budget / dist);
-                    long sx = Math.round(pendingX * f), sy = Math.round(pendingY * f);
-                    if (sx != 0 || sy != 0) {
-                        sx = Math.max(-32767, Math.min(32767, sx));
-                        sy = Math.max(-32767, Math.min(32767, sy));
-                        send(buttons, (int) sx, (int) sy, (byte) 0, (byte) 0);
-                        pendingX -= sx;
-                        pendingY -= sy;
-                        budget -= Math.hypot(sx, sy);
-                        if (pendingX == 0 && pendingY == 0) notifyAll();
-                    }
-                }
-            } catch (Exception ignored) {
-            }
-        }
     }
 
     // ---- Tamaño y orientación de la pantalla ----
