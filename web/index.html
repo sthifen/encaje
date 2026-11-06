@@ -17,6 +17,8 @@
     padding: 16px; pointer-events: none; }
   #status div { background: var(--panel); padding: 16px 20px; border-radius: 12px; max-width: 420px; }
   #status small { color: var(--muted); display: block; margin-top: 6px; }
+  #take { pointer-events: auto; margin-top: 10px; }
+  #take[hidden] { display: none; }
   #menu-btn { position: fixed; top: 8px; right: 8px; width: 40px; height: 40px; border-radius: 50%;
     border: 0; background: var(--panel); color: var(--fg); font-size: 20px; opacity: .35; z-index: 3; }
   #menu-btn:hover, #menu-btn:focus-visible { opacity: 1; }
@@ -36,7 +38,7 @@
 </head>
 <body>
 <div id="screen"><video id="video" autoplay playsinline muted></video><canvas id="canvas"></canvas></div>
-<div id="status"><div><span id="status-text">Conectando…</span><small id="status-hint"></small></div></div>
+<div id="status"><div><span id="status-text">Conectando…</span><small id="status-hint"></small><button id="take" hidden>Usar aquí</button></div></div>
 <button id="menu-btn" aria-label="Menú">⋮</button>
 <div id="menu">
   <button data-act="fullscreen">Pantalla completa</button>
@@ -87,11 +89,43 @@ function scheduleReconnect(why) {
 function connect() {
   clearTimeout(reconnectTimer);
   if (session) session.close();
+  session = null;
   video.style.display = canvas.style.display = "none";
   status("Conectando…", mode === "ws" ? "WebSocket + WebCodecs" : "WebRTC");
-  session = mode === "ws" ? startWebSocket() : startWebRTC();
-  connectInput();
+  if (seated) session = mode === "ws" ? startWebSocket() : startWebRTC();
+  else connectInput(); // el vídeo arranca al tener el monitor
 }
+
+// ── Quién usa el monitor ─────────────────────────────────────────────────
+// Sólo una tablet a la vez (ver src/viewers.rs). La conexión de entrada ocupa
+// el puesto; dentro de la app, el aviso lo muestra el lanzador.
+const app = window.EncajeNative;
+let seated = false, pick = params.get("pick") === "1", taken = false;
+
+function clientId() {
+  if (app) return app.clientId();
+  try {
+    let id = localStorage.getItem("client");
+    if (!id) { id = crypto.randomUUID ? crypto.randomUUID() : String(Math.random()).slice(2); localStorage.setItem("client", id); }
+    return id;
+  } catch (_) { return String(Math.random()).slice(2); }
+}
+const client = clientId(), viewerName = app ? app.deviceName() : "un navegador";
+
+function onTaken(kind, by) {
+  taken = true; seated = false;
+  clearTimeout(reconnectTimer);
+  if (session) { session.close(); session = null; }
+  if (app) { app.taken(kind, by); return; }
+  video.style.display = canvas.style.display = "none";
+  status((kind === "busy" ? "En uso en " : "Ahora se usa en ") + by);
+  $("take").hidden = false;
+}
+$("take").onclick = () => {
+  $("take").hidden = true;
+  taken = false; pick = true;
+  connect();
+};
 
 // ── Transporte 1: WebSocket + WebCodecs ──────────────────────────────────
 function spsFromAnnexB(buf) {
@@ -347,9 +381,22 @@ markScale();
 
 function connectInput() {
   if (inputWs && inputWs.readyState <= 1) return;
-  inputWs = new WebSocket(wsBase + "/ws/input");
-  inputWs.onopen = sendSize;
-  inputWs.onclose = () => setTimeout(connectInput, 1500);
+  const who = new URLSearchParams({ seat: "1", client, name: viewerName, mode: pick ? "pick" : "auto" });
+  inputWs = new WebSocket(wsBase + "/ws/input?" + who);
+  inputWs.onmessage = (e) => {
+    const m = JSON.parse(e.data);
+    if (m.type === "seated") {
+      seated = true; pick = false;
+      sendSize();
+      if (!session) connect();
+    } else if (m.type === "busy" || m.type === "replaced") {
+      onTaken(m.type, m.by);
+    }
+  };
+  inputWs.onclose = () => {
+    seated = false;
+    if (!taken) setTimeout(connectInput, 1500);
+  };
 }
 const send = (ev) => { if (inputWs && inputWs.readyState === 1) inputWs.send(JSON.stringify(ev)); };
 

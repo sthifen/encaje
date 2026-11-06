@@ -6,6 +6,7 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.webkit.JavascriptInterface;
 import android.graphics.Color;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.view.Display;
@@ -27,6 +28,9 @@ import android.webkit.WebViewClient;
  */
 public class MainActivity extends Activity {
     private static final String LAUNCHER = "file:///android_asset/launcher.html";
+    /** Android 5: primera versión con un WebView actualizable. */
+    static final int WEB_VIEWER_MIN_SDK = Build.VERSION_CODES.LOLLIPOP;
+    private final PcFinder finder = new PcFinder();
     private WebView web;
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -62,6 +66,13 @@ public class MainActivity extends Activity {
                 if (req.isForMainFrame() && !req.getUrl().toString().startsWith("file:")) {
                     view.loadUrl(LAUNCHER + "#error");
                 }
+            }
+
+            /** Lo mismo antes de Android 6, que sólo avisa de la página principal. */
+            @SuppressWarnings("deprecation")
+            @Override
+            public void onReceivedError(WebView view, int code, String description, String url) {
+                if (url != null && !url.startsWith("file:")) view.loadUrl(LAUNCHER + "#error");
             }
         });
         web.addJavascriptInterface(new NativeBridge(), "EncajeNative");
@@ -107,9 +118,62 @@ public class MainActivity extends Activity {
             return getSharedPreferences("encaje", MODE_PRIVATE);
         }
 
+        /** El visor web necesita WebCodecs o WebRTC: sin ellos, sólo el nativo. */
+        @JavascriptInterface
+        public boolean webViewerWorks() {
+            return Build.VERSION.SDK_INT >= WEB_VIEWER_MIN_SDK;
+        }
+
+        /** {@code adb reverse} no existe antes de Android 5. */
+        @JavascriptInterface
+        public boolean usbWorks() {
+            return Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP;
+        }
+
         @JavascriptInterface
         public boolean isEnabled() {
-            return prefs().getBoolean("native", true);
+            return !webViewerWorks() || prefs().getBoolean("native", true);
+        }
+
+        /** Para el visor web: quién soy ante el PC. */
+        @JavascriptInterface
+        public String clientId() {
+            return MainActivity.clientId(prefs());
+        }
+
+        @JavascriptInterface
+        public String deviceName() {
+            return Build.MODEL;
+        }
+
+        /** Para el visor web: el monitor lo usa otra tablet; se avisa en el lanzador. */
+        @JavascriptInterface
+        public void taken(String kind, String by) {
+            runOnUiThread(() -> {
+                Uri page = Uri.parse(web.getUrl());
+                showTaken(kind, by, page.getHost(), page.getPort());
+            });
+        }
+
+        /** Último PC con el que se conectó ("" si ninguno). Por su id: su IP cambia. */
+        @JavascriptInterface
+        public String lastPc() {
+            return prefs().getString("last_pc", "");
+        }
+
+        @JavascriptInterface
+        public void rememberPc(String id) {
+            prefs().edit().putString("last_pc", id).apply();
+        }
+
+        @JavascriptInterface
+        public void scan(int port) {
+            finder.start(port);
+        }
+
+        @JavascriptInterface
+        public String scanState() {
+            return finder.state();
         }
 
         @JavascriptInterface
@@ -117,18 +181,39 @@ public class MainActivity extends Activity {
             prefs().edit().putBoolean("native", on).apply();
         }
 
-        /** Abre el visor nativo; {@code false} si se prefiere el web. */
+        /**
+         * Abre el visor nativo; {@code false} si se prefiere el web.
+         * {@code pick}: lo eligió la persona, y se queda con el monitor.
+         */
         @JavascriptInterface
-        public boolean open(String host, int port) {
+        public boolean open(String host, int port, boolean pick) {
             if (!isEnabled()) return false;
             runOnUiThread(() -> startActivityForResult(new Intent(MainActivity.this, NativeViewerActivity.class)
                     .putExtra(NativeViewerActivity.EXTRA_HOST, host)
-                    .putExtra(NativeViewerActivity.EXTRA_PORT, port), REQUEST_NATIVE));
+                    .putExtra(NativeViewerActivity.EXTRA_PORT, port)
+                    .putExtra(NativeViewerActivity.EXTRA_PICK, pick)
+                    .putExtra(NativeViewerActivity.EXTRA_SYNC_DECODER,
+                            getIntent().getBooleanExtra(NativeViewerActivity.EXTRA_SYNC_DECODER, false)),
+                    REQUEST_NATIVE));
             return true;
         }
     }
 
     private static final int REQUEST_NATIVE = 1;
+
+    private void showTaken(String kind, String by, String host, int port) {
+        web.loadUrl(LAUNCHER + "#" + kind + "|" + Uri.encode(by) + "|" + host + "|" + port);
+    }
+
+    /** Identifica a esta tablet ante el PC. */
+    static String clientId(SharedPreferences prefs) {
+        String id = prefs.getString("client_id", null);
+        if (id == null) {
+            id = java.util.UUID.randomUUID().toString();
+            prefs.edit().putString("client_id", id).apply();
+        }
+        return id;
+    }
 
     @Override
     protected void onActivityResult(int request, int result, Intent data) {
@@ -138,6 +223,11 @@ public class MainActivity extends Activity {
             // "Usar el visor web" desde el menú del nativo: sólo esta vez.
             web.loadUrl("http://" + data.getStringExtra(NativeViewerActivity.EXTRA_HOST) + ":"
                     + data.getIntExtra(NativeViewerActivity.EXTRA_PORT, 8787) + "/");
+        } else if (result == NativeViewerActivity.RESULT_TAKEN && data != null) {
+            showTaken(data.getStringExtra(NativeViewerActivity.EXTRA_TAKEN),
+                    data.getStringExtra(NativeViewerActivity.EXTRA_BY),
+                    data.getStringExtra(NativeViewerActivity.EXTRA_HOST),
+                    data.getIntExtra(NativeViewerActivity.EXTRA_PORT, 8787));
         } else {
             web.loadUrl(LAUNCHER + "#manual"); // volvió con "atrás": no reconectar solo
         }

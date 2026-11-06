@@ -20,7 +20,10 @@ BT_ZIP=build-tools_r36.1_linux.zip
 PLATFORM=android-36
 PLATFORM_ZIP=platform-36_r02.zip
 REPO=https://dl.google.com/android/repository
-MIN_SDK=24
+# La app llega a Android 4.4. El servidor de entrada (--input-only) va por adb
+# y usa APIs internas: se queda en Android 7.
+MIN_SDK=19
+SERVER_MIN_SDK=24
 
 # La versión de la app es la del programa (Cargo.toml): 0.8.0 → código 800.
 VERSION="$(grep -m1 '^version' "$HERE/../Cargo.toml" | cut -d'"' -f2)"
@@ -69,7 +72,7 @@ echo "→ dex"
   $(find "$OUT/classes" -name '*.class')
 (cd "$OUT/dex" && zip -q "$OUT/base.apk" classes.dex)
 mkdir -p "$OUT/server-dex"
-"$BT/d8" --release --min-api $MIN_SDK --lib "$ANDROID_JAR" --output "$OUT/server-dex" \
+"$BT/d8" --release --min-api $SERVER_MIN_SDK --lib "$ANDROID_JAR" --output "$OUT/server-dex" \
   $(find "$OUT/server-classes" -name '*.class')
 rm -f "$HERE/input-server.jar"
 (cd "$OUT/server-dex" && zip -q -X "$HERE/input-server.jar" classes.dex)

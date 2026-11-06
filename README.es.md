@@ -155,8 +155,22 @@ enlace simulado de 7 Mbit/s el retraso de cola pasa de ~3 s a ~11 ms).
 
 ### Móvil o tablet por WiFi
 
-En la app, escribe la IP del PC en el recuadro *WiFi*, o abre
-`http://IP-DEL-PC:8787` en cualquier navegador. Se usa WebRTC.
+Abre Encaje en el PC y la app de la tablet: el PC aparece solo en la lista,
+con su nombre. Tócalo para conectar; la próxima vez se conecta sin tocar nada.
+
+Si no aparece (hay redes que aíslan a sus equipos), escribe la dirección que
+muestra la ventana de Encaje en el PC, o ábrela en cualquier navegador. En el
+navegador se usa WebRTC.
+
+La app funciona desde **Android 4.4**. Antes de Android 5 sólo por WiFi y con
+el visor nativo: `adb reverse` y el visor web necesitan versiones más nuevas.
+
+### Varias tablets
+
+Hay un solo monitor virtual, así que lo usa una tablet a la vez. La otra muestra
+*En uso en…* con un botón para quedárselo. Si una entra sola por WiFi y otra
+por USB, gana el cable, que es más rápido; lo que elijas a mano no te lo quita
+ninguna conexión automática. La ventana del PC dice quién lo está usando.
 
 ### Sólo ratón y teclado (`--input-only`)
 

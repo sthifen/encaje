@@ -110,9 +110,17 @@ struct State {
     /// El hilo de adb sólo consulta mientras la guía está abierta.
     polling: Arc<AtomicBool>,
     install: String,
+    /// Quién usa el monitor ahora.
+    viewer: Option<String>,
 }
 
+/// El puerto por defecto, el único que la app busca sola.
+const DEFAULT_PORT: u16 = 8787;
+/// Cada cuánto se mira si cambió la red.
+const WIFI_REFRESH: Duration = Duration::from_secs(2);
+
 const CSS: &str = r#"
+.wifi-hint { font-size: 12px; opacity: 0.8; margin-top: 8px; }
 window.encaje { background: transparent; }
 window.encaje.csd {
   border-radius: 28px;
@@ -226,6 +234,7 @@ fn build(app: &gtk::Application) {
         wanted: None,
         running: None,
         status: Status::Off,
+        viewer: None,
         restart_at: None,
         failures: 0,
         next_id: 0,
@@ -361,6 +370,14 @@ fn build(app: &gtk::Application) {
     pages.add_named(&guide_ui.root, Some("guide"));
     content.append(&pages);
 
+    // Cómo llegar desde la tablet por WiFi. Se puede seleccionar y copiar.
+    let wifi = gtk::Label::new(None);
+    wifi.set_selectable(true);
+    wifi.set_wrap(true);
+    wifi.set_justify(gtk::Justification::Center);
+    wifi.add_css_class("wifi-hint");
+    content.append(&wifi);
+
     let handle = gtk::WindowHandle::new();
     handle.set_child(Some(&glass));
     window.set_child(Some(&handle));
@@ -384,6 +401,7 @@ fn build(app: &gtk::Application) {
     {
         let state = state.clone();
         let window = window.clone();
+        let mut wifi_checked = Instant::now().checked_sub(WIFI_REFRESH).unwrap_or_else(Instant::now);
         glib::timeout_add_local(Duration::from_millis(33), move || {
             let mut s = state.borrow_mut();
             while let Ok(msg) = rx.try_recv() {
@@ -418,6 +436,14 @@ fn build(app: &gtk::Application) {
                     button.remove_css_class("active");
                 }
                 icon.queue_draw();
+            }
+            if wifi_checked.elapsed() >= WIFI_REFRESH {
+                wifi_checked = Instant::now();
+                let text = (s.wanted == Some(Mode::Monitor) && s.guide.is_none())
+                    .then(|| connect_hint(s.viewer.as_deref()))
+                    .flatten();
+                wifi.set_visible(text.is_some());
+                wifi.set_text(text.as_deref().unwrap_or_default());
             }
             aurora.queue_draw();
             glib::ControlFlow::Continue
@@ -775,6 +801,7 @@ fn handle_event(s: &mut State, id: u64, ev: &serde_json::Value) {
             play_overlay(mode, &ev["monitor"]);
         }
         Some("waiting") | Some("disconnected") => s.status = Status::Waiting,
+        Some("viewer") => s.viewer = ev["label"].as_str().map(str::to_owned),
         _ => {}
     }
 }
@@ -815,6 +842,38 @@ fn send_report() {
 }
 
 // ---- Configuración ----
+
+/// Quién usa el monitor y cómo cambiarlo, o cómo conectar si no hay nadie.
+fn connect_hint(viewer: Option<&str>) -> Option<String> {
+    match viewer {
+        Some(v) => Some(format!("En uso en {v}.\nPara cambiar, abre la app en la otra tablet y toca este PC.")),
+        None => wifi_hint(),
+    }
+}
+
+/// Qué hacer en la tablet para conectar por WiFi; nada si no hay red.
+fn wifi_hint() -> Option<String> {
+    let port = config_port();
+    let urls: Vec<String> = crate::lan::addresses().iter().map(|ip| format!("http://{ip}:{port}")).collect();
+    let first = urls.first()?;
+    Some(match port {
+        DEFAULT_PORT => format!(
+            "Por WiFi: en la app de la tablet, toca «{}».\nEn un navegador: {first}",
+            crate::lan::hostname()
+        ),
+        _ => format!("Por WiFi, escribe en la tablet: {first}"),
+    })
+}
+
+/// Puerto del servidor, si encaje.conf lo cambia.
+fn config_port() -> u16 {
+    let args = config_args();
+    args.iter()
+        .position(|a| a == "--port")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(DEFAULT_PORT)
+}
 
 fn config_dir() -> PathBuf {
     std::env::var_os("XDG_CONFIG_HOME")

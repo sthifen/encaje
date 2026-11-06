@@ -4,99 +4,199 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Encaje</title>
+<!-- Lo abre también el WebView de Android 4.4 (Chromium 30): sólo ES5, nada de
+     grid, variables CSS ni fetch. -->
 <style>
-  :root { --bg: #0d1117; --card: #161b22; --fg: #e6edf3; --muted: #8b949e; --accent: #4f8cff; --ok: #3fb950; --line: #30363d; }
   * { box-sizing: border-box; }
-  body { margin: 0; min-height: 100vh; background: var(--bg); color: var(--fg); display: grid; place-items: center;
-    font: 15px/1.45 system-ui, Roboto, sans-serif; padding: 16px; }
-  main { width: 100%; max-width: 760px; display: grid; gap: 16px; grid-template-columns: 1fr 1fr; }
-  h1 { grid-column: 1 / -1; margin: 0; font-size: 20px; font-weight: 600; }
-  h1 small { display: block; color: var(--muted); font-weight: 400; font-size: 13px; }
-  section { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 16px; display: grid; gap: 10px; align-content: start; }
-  h2 { margin: 0; font-size: 15px; }
-  p { margin: 0; color: var(--muted); font-size: 13px; }
-  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); margin-right: 6px; }
-  .dot.ok { background: var(--ok); }
-  input, button { font: inherit; border-radius: 10px; border: 1px solid var(--line); padding: 10px 12px; }
-  input { background: var(--bg); color: var(--fg); width: 100%; }
-  button { background: var(--accent); color: #fff; border: 0; font-weight: 600; }
+  body { margin: 0; min-height: 100vh; background: #0d1117; color: #e6edf3; padding: 16px;
+    font: 15px/1.45 Roboto, sans-serif; display: flex; align-items: center; justify-content: center; }
+  main { width: 100%; max-width: 560px; }
+  h1 { margin: 0 0 14px; font-size: 20px; font-weight: 600; }
+  h1 small { display: block; color: #8b949e; font-weight: 400; font-size: 13px; }
+  section { background: #161b22; border: 1px solid #30363d; border-radius: 14px; padding: 16px; margin-bottom: 14px; }
+  h2 { margin: 0 0 10px; font-size: 15px; }
+  p { margin: 0 0 10px; color: #8b949e; font-size: 13px; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #8b949e; margin-right: 6px; }
+  .dot.ok { background: #3fb950; }
+  input, button { font: inherit; border-radius: 10px; border: 1px solid #30363d; padding: 10px 12px; }
+  input[type=text] { background: #0d1117; color: #e6edf3; width: 100%; min-width: 0; }
+  button { background: #4f8cff; color: #fff; border: 0; font-weight: 600; }
   button:disabled { opacity: .45; }
-  .row { display: flex; gap: 8px; }
-  .row input:last-child { max-width: 90px; }
-  #native-row { grid-column: 1 / -1; color: #9a9a9a; font-size: 13px; display: flex; gap: 8px; align-items: center; }
-  #native-row[hidden] { display: none; }
-  #msg { grid-column: 1 / -1; color: #f0883e; font-size: 13px; min-height: 1em; }
-  @media (max-width: 560px) { main { grid-template-columns: 1fr; } }
+  button.quiet { background: none; color: #4f8cff; padding: 4px 0; font-weight: 400; }
+  .row { display: flex; }
+  .row input { flex: 1; margin-right: 8px; }
+  .pc { display: block; width: 100%; text-align: left; margin-bottom: 8px; }
+  .pc small { display: block; font-weight: 400; opacity: .8; }
+  #native-row { display: flex; align-items: center; color: #9a9a9a; font-size: 13px; }
+  #native-row input { margin: 0 8px 0 0; }
+  #msg { color: #f0883e; font-size: 13px; min-height: 1em; margin-bottom: 8px; }
+  [hidden] { display: none !important; }
 </style>
 </head>
 <body>
 <main>
-  <h1>Encaje<small>Ejecuta <code>encaje</code> en el PC y elige cómo conectar.</small></h1>
+  <h1>Encaje<small>Abre Encaje en el PC y toca su nombre aquí.</small></h1>
+  <div id="msg"></div>
+  <section id="taken" hidden>
+    <h2 id="taken-text"></h2>
+    <button id="take">Usar en esta tablet</button>
+  </section>
   <section>
-    <h2>USB</h2>
-    <p>Activa la depuración USB y conecta el cable. El servidor configura <code>adb reverse</code> automáticamente.</p>
+    <h2>En tu WiFi</h2>
+    <div id="pcs"></div>
+    <p id="scan-state"><span class="dot"></span>Buscando tu PC…</p>
+    <button id="more" class="quiet">¿No aparece? Escribir la dirección</button>
+    <div id="manual" hidden>
+      <p>Es la dirección que muestra Encaje en el PC.</p>
+      <div class="row"><input id="host" type="text" placeholder="192.168.1.50" autocomplete="off" autocapitalize="off" spellcheck="false"><button id="wifi-btn">Conectar</button></div>
+    </div>
+  </section>
+  <section id="usb">
+    <h2>Por cable USB</h2>
     <p id="usb-state"><span class="dot"></span>Buscando PC…</p>
     <button id="usb-btn" disabled>Conectar por USB</button>
   </section>
-  <section>
-    <h2>WiFi</h2>
-    <p>Misma red que el PC. Usa la IP que muestra el servidor.</p>
-    <div class="row"><input id="host" placeholder="192.168.1.50" inputmode="decimal" autocomplete="off"><input id="port" value="8787" inputmode="numeric"></div>
-    <button id="wifi-btn">Conectar por WiFi</button>
-  </section>
   <label id="native-row" hidden><input type="checkbox" id="native"> Visor nativo (menos retraso; desmárcalo para usar el del navegador)</label>
-  <div id="msg"></div>
 </main>
 <script>
 "use strict";
-const $ = (id) => document.getElementById(id);
-const store = { get(k, d) { try { return localStorage.getItem(k) ?? d; } catch (_) { return d; } },
-                set(k, v) { try { localStorage.setItem(k, v); } catch (_) {} } };
-$("host").value = store.get("host", "");
-$("port").value = store.get("port", "8787");
-// Al volver con "atrás" no se reconecta solo; tras un error sí.
-const auto = location.hash !== "#manual";
-if (location.hash === "#error") $("msg").textContent = "Se perdió la conexión con el PC. Reintentando…";
+var DEFAULT_PORT = 8787, SCAN_PAUSE_MS = 8000;
+function $(id) { return document.getElementById(id); }
+function get(k, d) { try { var v = localStorage.getItem(k); return v === null ? d : v; } catch (_) { return d; } }
+function set(k, v) { try { localStorage.setItem(k, v); } catch (_) {} }
 
-async function probe(host, port) {
-  const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), 1200);
-  try { const r = await fetch(`http://${host}:${port}/info`, { signal: ctl.signal, cache: "no-store" }); return r.ok ? await r.json() : null; }
-  catch (_) { return null; } finally { clearTimeout(t); }
+// Al volver del visor sólo cambia el "#": hay que arrancar de nuevo.
+window.onhashchange = function () { location.reload(); };
+
+// Al volver con "atrás" no se reconecta solo; tras un error sí. Si el monitor
+// lo usa otra tablet tampoco: quitárselo lo decide la persona.
+var taken = /^#(busy|replaced)\|([^|]*)\|([^|]*)\|(\d+)$/.exec(location.hash);
+var auto = location.hash !== "#manual" && !taken;
+if (location.hash === "#error") $("msg").textContent = "Se perdió la conexión con el PC. Reintentando…";
+if (taken) {
+  var by = decodeURIComponent(taken[2]);
+  $("taken-text").textContent = (taken[1] === "busy" ? "En uso en " : "Ahora se usa en ") + by;
+  $("taken").hidden = false;
+  $("take").onclick = function () { go(taken[3], parseInt(taken[4], 10), true); };
 }
+
+function probe(host, port, done) {
+  var x = new XMLHttpRequest(), ended = false;
+  function end(info) { if (!ended) { ended = true; done(info); } }
+  x.open("GET", "http://" + host + ":" + port + "/info?" + Date.now());
+  x.timeout = 1500;
+  x.onload = function () {
+    var info = null;
+    try { if (x.status === 200) info = JSON.parse(x.responseText); } catch (_) {}
+    end(info);
+  };
+  x.onerror = x.ontimeout = function () { end(null); };
+  x.send();
+}
+
 // Visor nativo de la app (MediaCodec directo a la pantalla) si está
 // disponible y elegido; si no, el web ("localhost" es contexto seguro: podrá
 // usar WebCodecs).
-const bridge = window.EncajeNative;
-if (bridge) {
+var bridge = window.EncajeNative;
+if (bridge.webViewerWorks()) {
   $("native-row").hidden = false;
   $("native").checked = bridge.isEnabled();
-  $("native").onchange = () => bridge.setEnabled($("native").checked);
+  $("native").onchange = function () { bridge.setEnabled($("native").checked); };
 }
-const go = (host, port) => {
-  if (bridge && bridge.open(host, parseInt(port, 10) || 8787)) return;
-  location.href = `http://${host}:${port}/`;
+function go(host, port, pick) {
+  connecting = true; // mientras se usa el visor no se busca nada
+  if (bridge.open(host, port, pick)) return;
+  location.href = "http://" + host + ":" + port + "/" + (pick ? "?pick=1" : "");
+}
+
+// Acepta lo que se copie del PC: "http://192.168.1.50:8787/", "192.168.1.50:8787"
+// o "192.168.1.50".
+function parseAddress(text) {
+  var m = /^(?:https?:\/\/)?([^\/:\s]+)(?::(\d+))?\/?$/i.exec(text.replace(/^\s+|\s+$/g, ""));
+  return m ? { host: m[1], port: parseInt(m[2], 10) || DEFAULT_PORT } : null;
+}
+
+function showPcs(pcs) {
+  var box = $("pcs");
+  box.textContent = "";
+  pcs.forEach(function (pc) {
+    var b = document.createElement("button"), small = document.createElement("small");
+    b.className = "pc";
+    b.textContent = pc.name;
+    small.textContent = pc.host;
+    b.appendChild(small);
+    b.onclick = function () { bridge.rememberPc(pc.id); go(pc.host, pc.port, true); };
+    box.appendChild(b);
+  });
+}
+
+// Un PC con cable y WiFi responde por dos direcciones: se muestra una sola.
+function uniquePcs(pcs) {
+  var seen = {};
+  return pcs.filter(function (pc) {
+    var isNew = !(pc.id in seen);
+    seen[pc.id] = true;
+    return isNew;
+  });
+}
+
+// Si hay cable manda el cable: por WiFi sólo se conecta solo cuando ya se sabe
+// que por USB no hay nada.
+var connecting = false, nextScan = 0, usbMissing = !bridge.usbWorks();
+function pollScan() {
+  if (connecting) return;
+  var s = JSON.parse(bridge.scanState()), last = bridge.lastPc();
+  s.pcs = uniquePcs(s.pcs);
+  showPcs(s.pcs);
+  // El PC de siempre se conecta solo, aunque le haya cambiado la IP.
+  for (var i = 0; auto && usbMissing && i < s.pcs.length; i++) {
+    if (s.pcs[i].id === last) { go(s.pcs[i].host, s.pcs[i].port, false); return; }
+  }
+  $("scan-state").innerHTML = s.pcs.length
+    ? '<span class="dot ok"></span>Toca tu PC para conectar.'
+    : '<span class="dot"></span>Buscando tu PC…';
+  if (!s.scanning && Date.now() >= nextScan) {
+    nextScan = Date.now() + SCAN_PAUSE_MS;
+    bridge.scan(DEFAULT_PORT);
+  }
+  setTimeout(pollScan, 700);
+}
+
+function pollUsb() {
+  if (connecting) return;
+  probe("localhost", DEFAULT_PORT, function (info) {
+    if (connecting) return;
+    usbMissing = !info;
+    $("usb-state").innerHTML = info
+      ? '<span class="dot ok"></span>PC detectado · ' + info.width + "×" + info.height + " @ " + info.fps + " fps"
+      : '<span class="dot"></span>Buscando PC por USB…';
+    $("usb-btn").disabled = !info;
+    if (info && auto) { go("localhost", DEFAULT_PORT, false); return; }
+    setTimeout(pollUsb, 1500);
+  });
+}
+
+$("more").onclick = function () {
+  $("more").hidden = true;
+  $("manual").hidden = false;
+  $("host").focus();
+};
+$("usb-btn").onclick = function () { go("localhost", DEFAULT_PORT, true); };
+$("host").value = get("host", "");
+$("wifi-btn").onclick = function () {
+  var a = parseAddress($("host").value);
+  if (!a) { $("msg").textContent = "Escribe la dirección del PC, por ejemplo 192.168.1.50."; return; }
+  set("host", $("host").value);
+  $("msg").textContent = "Conectando…";
+  probe(a.host, a.port, function (info) {
+    if (info) { if (info.id) bridge.rememberPc(info.id); go(a.host, a.port, true); }
+    else $("msg").textContent = "No se pudo contactar con " + a.host + ":" + a.port + ". ¿Está Encaje abierto en el PC y el cortafuegos permite la conexión?";
+  });
 };
 
-async function pollUsb() {
-  const port = $("port").value || "8787";
-  const info = await probe("localhost", port);
-  $("usb-state").innerHTML = info
-    ? `<span class="dot ok"></span>PC detectado · ${info.width}×${info.height} @ ${info.fps} fps`
-    : `<span class="dot"></span>Buscando PC por USB…`;
-  $("usb-btn").disabled = !info;
-  if (info && auto) return go("localhost", port);
-  setTimeout(pollUsb, 1500);
-}
-$("usb-btn").onclick = () => go("localhost", $("port").value || "8787");
-$("wifi-btn").onclick = async () => {
-  const host = $("host").value.trim(), port = $("port").value.trim() || "8787";
-  if (!host) { $("msg").textContent = "Escribe la IP del PC."; return; }
-  store.set("host", host); store.set("port", port);
-  $("msg").textContent = "Conectando…";
-  if (await probe(host, port)) go(host, port);
-  else $("msg").textContent = `No se pudo contactar con ${host}:${port}. ¿Está el servidor en marcha y el cortafuegos abierto?`;
-};
-pollUsb();
+pollScan();
+if (bridge.usbWorks()) pollUsb();
+else $("usb").hidden = true;
 </script>
 </body>
 </html>

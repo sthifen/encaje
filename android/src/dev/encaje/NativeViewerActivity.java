@@ -6,6 +6,7 @@ import android.content.SharedPreferences;
 import android.content.res.Configuration;
 import android.graphics.Color;
 import android.graphics.Point;
+import android.net.Uri;
 import android.media.MediaCodec;
 import android.media.MediaFormat;
 import android.os.Build;
@@ -37,6 +38,9 @@ import android.widget.TextView;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
+
+import org.json.JSONException;
+import org.json.JSONObject;
 import java.util.ArrayDeque;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -59,13 +63,29 @@ import java.util.concurrent.Executors;
  */
 public class NativeViewerActivity extends Activity implements SurfaceHolder.Callback {
     static final String EXTRA_HOST = "host", EXTRA_PORT = "port";
+    /** Fuerza el bucle síncrono del decodificador (para probarlo en equipos nuevos). */
+    static final String EXTRA_SYNC_DECODER = "sync_decoder";
+    /** Los callbacks con Handler de MediaCodec llegan en Android 6. */
+    private static final int ASYNC_DECODER_MIN_SDK = Build.VERSION_CODES.M;
+    /** Cada cuánto se atiende el decodificador síncrono. */
+    private static final int SYNC_PUMP_MS = 3;
+    /** Lado máximo pedido en Android viejo: sus decodificadores no suelen pasar de 1080p. */
+    private static final int OLD_DEVICE_MAX_SIDE = 1920;
     /** Resultado: el usuario pidió el visor web. */
     static final int RESULT_WEB = RESULT_FIRST_USER;
+    /** Resultado: el monitor lo usa otra tablet ({@link #EXTRA_TAKEN}, {@link #EXTRA_BY}). */
+    static final int RESULT_TAKEN = RESULT_FIRST_USER + 1;
+    static final String EXTRA_TAKEN = "taken", EXTRA_BY = "by";
+    /** Lo eligió la persona (no es una reconexión automática): se queda con el monitor. */
+    static final String EXTRA_PICK = "pick";
 
     private static final int[] RATES = {144, 120, 90, 75, 60, 48, 30};
 
     private String host;
     private int port;
+    private String clientId;
+    /** Sólo la primera conexión cuenta como elección; al reconectar ya no. */
+    private volatile boolean pick;
     private SharedPreferences prefs;
 
     private FrameLayout root;
@@ -84,6 +104,10 @@ public class NativeViewerActivity extends Activity implements SurfaceHolder.Call
     private HandlerThread codecThread;
     private Handler codec;
     private MediaCodec decoder;
+    private boolean syncDecoder;
+    private ByteBuffer[] syncInputs;
+    private final MediaCodec.BufferInfo syncInfo = new MediaCodec.BufferInfo();
+    private final Runnable syncPump = this::pumpSync;
     private String decoderName = "?";
     private byte[] configuredSps;
     private boolean waitKey = true;
@@ -113,6 +137,10 @@ public class NativeViewerActivity extends Activity implements SurfaceHolder.Call
         host = getIntent().getStringExtra(EXTRA_HOST);
         port = getIntent().getIntExtra(EXTRA_PORT, 8787);
         prefs = getSharedPreferences("encaje", MODE_PRIVATE);
+        pick = getIntent().getBooleanExtra(EXTRA_PICK, false);
+        clientId = MainActivity.clientId(prefs);
+        syncDecoder = Build.VERSION.SDK_INT < ASYNC_DECODER_MIN_SDK
+                || getIntent().getBooleanExtra(EXTRA_SYNC_DECODER, false);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             getWindow().getAttributes().layoutInDisplayCutoutMode =
@@ -207,12 +235,16 @@ public class NativeViewerActivity extends Activity implements SurfaceHolder.Call
 
     private void videoLoop() {
         while (running) {
-            try (WebSocketClient ws = WebSocketClient.connect(host, port, "/ws/video", 3000)) {
+            try (WebSocketClient ws = WebSocketClient.connect(host, port, "/ws/video" + identity(), 3000)) {
                 videoWs = ws;
                 codec.post(() -> { waitKey = true; pending.clear(); });
                 while (running) {
                     WebSocketClient.Message m = ws.read();
-                    if (m.opcode != WebSocketClient.BINARY || m.data.length < 10) continue;
+                    if (m.opcode == WebSocketClient.TEXT) {
+                        onServerText(new String(m.data, java.nio.charset.StandardCharsets.UTF_8));
+                        continue;
+                    }
+                    if (m.data.length < 10) continue;
                     byte[] d = m.data;
                     long pts = 0;
                     for (int i = 1; i <= 8; i++) pts = (pts << 8) | (d[i] & 0xff);
@@ -230,6 +262,32 @@ public class NativeViewerActivity extends Activity implements SurfaceHolder.Call
             } finally {
                 videoWs = null;
             }
+        }
+    }
+
+    /** Quién soy, para que el PC sepa a qué tablet le toca el monitor. */
+    private String identity() {
+        return "?client=" + Uri.encode(clientId) + "&name=" + Uri.encode(Build.MODEL)
+                + "&mode=" + (pick ? "pick" : "auto");
+    }
+
+    private void onServerText(String text) {
+        try {
+            JSONObject msg = new JSONObject(text);
+            String type = msg.optString("type");
+            if (type.equals("config")) {
+                // Hasta ahora no era dueño: lo que pidió antes no contó.
+                pick = false;
+                ui.post(this::sendSize);
+            } else if (type.equals("busy") || type.equals("replaced")) {
+                running = false;
+                setResult(RESULT_TAKEN, new Intent()
+                        .putExtra(EXTRA_TAKEN, type).putExtra(EXTRA_BY, msg.optString("by"))
+                        .putExtra(EXTRA_HOST, host).putExtra(EXTRA_PORT, port));
+                ui.post(this::finish);
+            }
+        } catch (JSONException e) {
+            android.util.Log.w("Encaje", "mensaje del PC: " + e);
         }
     }
 
@@ -280,7 +338,7 @@ public class NativeViewerActivity extends Activity implements SurfaceHolder.Call
             Frame f = pending.poll();
             int idx = freeInputs.poll();
             try {
-                ByteBuffer buf = decoder.getInputBuffer(idx);
+                ByteBuffer buf = syncDecoder ? syncInputs[idx] : decoder.getInputBuffer(idx);
                 int len = f.data.length - f.off;
                 if (buf == null || buf.capacity() < len) {
                     // Frame más grande que el búfer: se pierde la cadena.
@@ -318,45 +376,15 @@ public class NativeViewerActivity extends Activity implements SurfaceHolder.Call
                 if (attempt == 0) lowLatency(fmt);
                 c = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC);
                 final MediaCodec dec = c;
-                c.setCallback(new MediaCodec.Callback() {
-                    @Override public void onInputBufferAvailable(MediaCodec m, int index) {
-                        if (m != decoder) return;
-                        freeInputs.add(index);
-                        feed();
-                    }
-                    @Override public void onOutputBufferAvailable(MediaCodec m, int index, MediaCodec.BufferInfo info) {
-                        if (m != decoder) return;
-                        Long t = queuedAt.remove(info.presentationTimeUs);
-                        if (t != null) {
-                            double ms = (System.nanoTime() - t) / 1e6;
-                            decodeMs += ms;
-                            winDecodeMs += ms;
-                            winN++;
-                        }
-                        decoded++;
-                        try {
-                            m.releaseOutputBuffer(index, true); // a la pantalla ya
-                        } catch (IllegalStateException ignored) {}
-                        if (decoded == 1) setStatus(null);
-                    }
-                    @Override public void onError(MediaCodec m, MediaCodec.CodecException e) {
-                        if (m == decoder) resetDecoder("decodificador: " + e.getDiagnosticInfo());
-                    }
-                    @Override public void onOutputFormatChanged(MediaCodec m, MediaFormat f) {
-                        if (m != decoder) return;
-                        int vw = f.getInteger(MediaFormat.KEY_WIDTH), vh = f.getInteger(MediaFormat.KEY_HEIGHT);
-                        if (f.containsKey("crop-right") && f.containsKey("crop-left")) {
-                            vw = f.getInteger("crop-right") - f.getInteger("crop-left") + 1;
-                            vh = f.getInteger("crop-bottom") - f.getInteger("crop-top") + 1;
-                        }
-                        videoW = vw;
-                        videoH = vh;
-                        ui.post(NativeViewerActivity.this::relayout);
-                    }
-                }, codec);
+                if (!syncDecoder) c.setCallback(new AsyncDecoder(), codec);
                 c.configure(fmt, h.getSurface(), null, 0);
                 c.start();
                 decoder = dec;
+                if (syncDecoder) {
+                    syncInputs = c.getInputBuffers();
+                    codec.removeCallbacks(syncPump);
+                    codec.post(syncPump);
+                }
                 decoderSince = System.nanoTime();
                 decoderName = c.getName();
                 configuredSps = sps;
@@ -372,6 +400,75 @@ public class NativeViewerActivity extends Activity implements SurfaceHolder.Call
             }
         }
         return false;
+    }
+
+    private void onDecoded(MediaCodec m, int index, MediaCodec.BufferInfo info) {
+        Long t = queuedAt.remove(info.presentationTimeUs);
+        if (t != null) {
+            double ms = (System.nanoTime() - t) / 1e6;
+            decodeMs += ms;
+            winDecodeMs += ms;
+            winN++;
+        }
+        decoded++;
+        try {
+            m.releaseOutputBuffer(index, true); // a la pantalla ya
+        } catch (IllegalStateException ignored) {}
+        if (decoded == 1) setStatus(null);
+    }
+
+    private void onVideoFormat(MediaFormat f) {
+        int vw = f.getInteger(MediaFormat.KEY_WIDTH), vh = f.getInteger(MediaFormat.KEY_HEIGHT);
+        if (f.containsKey("crop-right") && f.containsKey("crop-left")) {
+            vw = f.getInteger("crop-right") - f.getInteger("crop-left") + 1;
+            vh = f.getInteger("crop-bottom") - f.getInteger("crop-top") + 1;
+        }
+        videoW = vw;
+        videoH = vh;
+        ui.post(this::relayout);
+    }
+
+    /**
+     * Callbacks de Android 6 en adelante. Es una clase aparte porque
+     * {@code MediaCodec.Callback} no existe en Android 4.4: así sólo se carga
+     * donde se usa.
+     */
+    private final class AsyncDecoder extends MediaCodec.Callback {
+        @Override public void onInputBufferAvailable(MediaCodec m, int index) {
+            if (m != decoder) return;
+            freeInputs.add(index);
+            feed();
+        }
+        @Override public void onOutputBufferAvailable(MediaCodec m, int index, MediaCodec.BufferInfo info) {
+            if (m == decoder) onDecoded(m, index, info);
+        }
+        @Override public void onError(MediaCodec m, MediaCodec.CodecException e) {
+            if (m == decoder) resetDecoder("decodificador: " + e.getDiagnosticInfo());
+        }
+        @Override public void onOutputFormatChanged(MediaCodec m, MediaFormat f) {
+            if (m == decoder) onVideoFormat(f);
+        }
+    }
+
+    /** Lo mismo que {@link AsyncDecoder}, preguntando al decodificador cada pocos ms. */
+    @SuppressWarnings("deprecation")
+    private void pumpSync() {
+        MediaCodec d = decoder;
+        if (d == null) return;
+        try {
+            for (int i; (i = d.dequeueOutputBuffer(syncInfo, 0)) != MediaCodec.INFO_TRY_AGAIN_LATER; ) {
+                if (i >= 0) onDecoded(d, i, syncInfo);
+                else if (i == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) onVideoFormat(d.getOutputFormat());
+            }
+            for (int i; freeInputs.size() < pending.size() && (i = d.dequeueInputBuffer(0)) >= 0; ) {
+                freeInputs.add(i);
+            }
+            feed();
+        } catch (IllegalStateException e) {
+            resetDecoder("decodificador: " + e);
+            return;
+        }
+        if (decoder == d) codec.postDelayed(syncPump, SYNC_PUMP_MS);
     }
 
     /** Claves de baja latencia: la estándar y las de cada fabricante (se ignoran si no aplican). */
@@ -396,6 +493,8 @@ public class NativeViewerActivity extends Activity implements SurfaceHolder.Call
     private void releaseDecoder() {
         MediaCodec d = decoder;
         decoder = null;
+        syncInputs = null;
+        codec.removeCallbacks(syncPump);
         configuredSps = null;
         freeInputs.clear();
         pending.clear();
@@ -515,6 +614,9 @@ public class NativeViewerActivity extends Activity implements SurfaceHolder.Call
         String scale = prefs.getString("scale", "1");
         float k;
         try { k = Float.parseFloat(scale); } catch (NumberFormatException e) { k = 1f; }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) {
+            k = Math.min(k, (float) OLD_DEVICE_MAX_SIDE / Math.max(p.x, p.y));
+        }
         int w = Math.round(p.x * k), h = Math.round(p.y * k);
         send(String.format(Locale.ROOT, "{\"t\":\"resize\",\"w\":%d,\"h\":%d,\"hz\":%d}", w, h, targetFps()));
     }
@@ -557,7 +659,7 @@ public class NativeViewerActivity extends Activity implements SurfaceHolder.Call
     private void inputLoop() {
         while (running) {
             try {
-                WebSocketClient ws = WebSocketClient.connect(host, port, "/ws/input", 3000);
+                WebSocketClient ws = WebSocketClient.connect(host, port, "/ws/input" + identity(), 3000);
                 inputWs = ws;
                 ui.post(this::sendSize);
                 ws.read(); // el servidor no manda nada: vuelve al cerrarse
@@ -582,10 +684,14 @@ public class NativeViewerActivity extends Activity implements SurfaceHolder.Call
         return String.format(Locale.ROOT, "\"x\":%.5f,\"y\":%.5f", nx, ny);
     }
 
+    private int oldMouseButton;
+
     private boolean onTouch(MotionEvent ev) {
         if (ev.isFromSource(InputDevice.SOURCE_MOUSE)) {
             // Los clics llegan como BUTTON_PRESS/RELEASE (onGeneric); aquí sólo arrastrar.
-            if (ev.getActionMasked() == MotionEvent.ACTION_MOVE) send("{\"t\":\"move\"," + xy(ev.getX(), ev.getY()) + "}");
+            int action = ev.getActionMasked();
+            if (action == MotionEvent.ACTION_MOVE) send("{\"t\":\"move\"," + xy(ev.getX(), ev.getY()) + "}");
+            else if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) oldMouseClick(ev, action);
             return true;
         }
         int a = ev.getActionMasked();
@@ -612,6 +718,18 @@ public class NativeViewerActivity extends Activity implements SurfaceHolder.Call
                 break;
         }
         return true;
+    }
+
+    /** Antes de Android 6 no hay BUTTON_PRESS: los clics son DOWN/UP con su estado de botones. */
+    private void oldMouseClick(MotionEvent ev, int action) {
+        if (action == MotionEvent.ACTION_DOWN) {
+            int s = ev.getButtonState();
+            oldMouseButton = (s & MotionEvent.BUTTON_SECONDARY) != 0 ? 2 : (s & MotionEvent.BUTTON_TERTIARY) != 0 ? 1 : 0;
+        } else if (action != MotionEvent.ACTION_UP) {
+            return;
+        }
+        send("{\"t\":\"move\"," + xy(ev.getX(), ev.getY()) + "}");
+        send("{\"t\":\"button\",\"b\":" + oldMouseButton + ",\"down\":" + (action == MotionEvent.ACTION_DOWN) + "}");
     }
 
     private boolean onGeneric(MotionEvent ev) {
@@ -715,7 +833,7 @@ public class NativeViewerActivity extends Activity implements SurfaceHolder.Call
             m.add(1, 10 + i, 1, (scales[i][0].equals(scale) ? "✓ " : "   ") + scales[i][1]);
         }
         m.add(2, 2, 2, "Reconectar");
-        m.add(2, 3, 2, "Usar el visor web");
+        if (Build.VERSION.SDK_INT >= MainActivity.WEB_VIEWER_MIN_SDK) m.add(2, 3, 2, "Usar el visor web");
         m.add(3, 4, 3, lastStats).setEnabled(false);
         pm.setOnMenuItemClickListener(item -> {
             int id = item.getItemId();
