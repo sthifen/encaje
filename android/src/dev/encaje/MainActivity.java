@@ -148,10 +148,10 @@ public class MainActivity extends Activity {
 
         /** Para el visor web: el monitor lo usa otra tablet; se avisa en el lanzador. */
         @JavascriptInterface
-        public void taken(String kind, String by) {
+        public void taken(String kind, String by, boolean extra) {
             runOnUiThread(() -> {
                 Uri page = Uri.parse(web.getUrl());
-                showTaken(kind, by, page.getHost(), page.getPort());
+                showTaken(kind, by, page.getHost(), page.getPort(), extra);
             });
         }
 
@@ -183,15 +183,16 @@ public class MainActivity extends Activity {
 
         /**
          * Abre el visor nativo; {@code false} si se prefiere el web.
-         * {@code pick}: lo eligió la persona, y se queda con el monitor.
+         * {@code mode}: "auto", "pick" (lo eligió la persona: se queda con el
+         * monitor) o "extra" (otro monitor).
          */
         @JavascriptInterface
-        public boolean open(String host, int port, boolean pick) {
+        public boolean open(String host, int port, String mode) {
             if (!isEnabled()) return false;
             runOnUiThread(() -> startActivityForResult(new Intent(MainActivity.this, NativeViewerActivity.class)
                     .putExtra(NativeViewerActivity.EXTRA_HOST, host)
                     .putExtra(NativeViewerActivity.EXTRA_PORT, port)
-                    .putExtra(NativeViewerActivity.EXTRA_PICK, pick)
+                    .putExtra(NativeViewerActivity.EXTRA_MODE, mode)
                     .putExtra(NativeViewerActivity.EXTRA_SYNC_DECODER,
                             getIntent().getBooleanExtra(NativeViewerActivity.EXTRA_SYNC_DECODER, false)),
                     REQUEST_NATIVE));
@@ -201,8 +202,8 @@ public class MainActivity extends Activity {
 
     private static final int REQUEST_NATIVE = 1;
 
-    private void showTaken(String kind, String by, String host, int port) {
-        web.loadUrl(LAUNCHER + "#" + kind + "|" + Uri.encode(by) + "|" + host + "|" + port);
+    private void showTaken(String kind, String by, String host, int port, boolean extra) {
+        web.loadUrl(LAUNCHER + "#" + kind + "|" + Uri.encode(by) + "|" + host + "|" + port + "|" + (extra ? 1 : 0));
     }
 
     /** Identifica a esta tablet ante el PC. */
@@ -227,7 +228,8 @@ public class MainActivity extends Activity {
             showTaken(data.getStringExtra(NativeViewerActivity.EXTRA_TAKEN),
                     data.getStringExtra(NativeViewerActivity.EXTRA_BY),
                     data.getStringExtra(NativeViewerActivity.EXTRA_HOST),
-                    data.getIntExtra(NativeViewerActivity.EXTRA_PORT, 8787));
+                    data.getIntExtra(NativeViewerActivity.EXTRA_PORT, 8787),
+                    data.getBooleanExtra(NativeViewerActivity.EXTRA_CAN_EXTEND, false));
         } else {
             web.loadUrl(LAUNCHER + "#manual"); // volvió con "atrás": no reconectar solo
         }

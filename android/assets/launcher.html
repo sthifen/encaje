@@ -40,6 +40,7 @@
   <section id="taken" hidden>
     <h2 id="taken-text"></h2>
     <button id="take">Usar en esta tablet</button>
+    <button id="add" hidden>Añadir como otro monitor</button>
   </section>
   <section>
     <h2>En tu WiFi</h2>
@@ -70,14 +71,18 @@ window.onhashchange = function () { location.reload(); };
 
 // Al volver con "atrás" no se reconecta solo; tras un error sí. Si el monitor
 // lo usa otra tablet tampoco: quitárselo lo decide la persona.
-var taken = /^#(busy|replaced)\|([^|]*)\|([^|]*)\|(\d+)$/.exec(location.hash);
+var taken = /^#(busy|replaced|full)\|([^|]*)\|([^|]*)\|(\d+)\|([01])$/.exec(location.hash);
 var auto = location.hash !== "#manual" && !taken;
 if (location.hash === "#error") $("msg").textContent = "Se perdió la conexión con el PC. Reintentando…";
 if (taken) {
   var by = decodeURIComponent(taken[2]);
-  $("taken-text").textContent = (taken[1] === "busy" ? "En uso en " : "Ahora se usa en ") + by;
+  $("taken-text").textContent = taken[1] === "full" ? "Ya no caben más monitores"
+    : (taken[1] === "busy" ? "En uso en " : "Ahora se usa en ") + by;
   $("taken").hidden = false;
-  $("take").onclick = function () { go(taken[3], parseInt(taken[4], 10), true); };
+  $("take").hidden = taken[1] === "full";
+  $("add").hidden = taken[5] !== "1";
+  $("take").onclick = function () { go(taken[3], parseInt(taken[4], 10), "pick"); };
+  $("add").onclick = function () { go(taken[3], parseInt(taken[4], 10), "extra"); };
 }
 
 function probe(host, port, done) {
@@ -103,10 +108,10 @@ if (bridge.webViewerWorks()) {
   $("native").checked = bridge.isEnabled();
   $("native").onchange = function () { bridge.setEnabled($("native").checked); };
 }
-function go(host, port, pick) {
+function go(host, port, mode) {
   connecting = true; // mientras se usa el visor no se busca nada
-  if (bridge.open(host, port, pick)) return;
-  location.href = "http://" + host + ":" + port + "/" + (pick ? "?pick=1" : "");
+  if (bridge.open(host, port, mode)) return;
+  location.href = "http://" + host + ":" + port + "/" + (mode === "auto" ? "" : "?" + mode + "=1");
 }
 
 // Acepta lo que se copie del PC: "http://192.168.1.50:8787/", "192.168.1.50:8787"
@@ -125,7 +130,7 @@ function showPcs(pcs) {
     b.textContent = pc.name;
     small.textContent = pc.host;
     b.appendChild(small);
-    b.onclick = function () { bridge.rememberPc(pc.id); go(pc.host, pc.port, true); };
+    b.onclick = function () { bridge.rememberPc(pc.id); go(pc.host, pc.port, "pick"); };
     box.appendChild(b);
   });
 }
@@ -150,7 +155,7 @@ function pollScan() {
   showPcs(s.pcs);
   // El PC de siempre se conecta solo, aunque le haya cambiado la IP.
   for (var i = 0; auto && usbMissing && i < s.pcs.length; i++) {
-    if (s.pcs[i].id === last) { go(s.pcs[i].host, s.pcs[i].port, false); return; }
+    if (s.pcs[i].id === last) { go(s.pcs[i].host, s.pcs[i].port, "auto"); return; }
   }
   $("scan-state").innerHTML = s.pcs.length
     ? '<span class="dot ok"></span>Toca tu PC para conectar.'
@@ -171,7 +176,7 @@ function pollUsb() {
       ? '<span class="dot ok"></span>PC detectado · ' + info.width + "×" + info.height + " @ " + info.fps + " fps"
       : '<span class="dot"></span>Buscando PC por USB…';
     $("usb-btn").disabled = !info;
-    if (info && auto) { go("localhost", DEFAULT_PORT, false); return; }
+    if (info && auto) { go("localhost", DEFAULT_PORT, "auto"); return; }
     setTimeout(pollUsb, 1500);
   });
 }
@@ -181,7 +186,7 @@ $("more").onclick = function () {
   $("manual").hidden = false;
   $("host").focus();
 };
-$("usb-btn").onclick = function () { go("localhost", DEFAULT_PORT, true); };
+$("usb-btn").onclick = function () { go("localhost", DEFAULT_PORT, "pick"); };
 $("host").value = get("host", "");
 $("wifi-btn").onclick = function () {
   var a = parseAddress($("host").value);
@@ -189,7 +194,7 @@ $("wifi-btn").onclick = function () {
   set("host", $("host").value);
   $("msg").textContent = "Conectando…";
   probe(a.host, a.port, function (info) {
-    if (info) { if (info.id) bridge.rememberPc(info.id); go(a.host, a.port, true); }
+    if (info) { if (info.id) bridge.rememberPc(info.id); go(a.host, a.port, "pick"); }
     else $("msg").textContent = "No se pudo contactar con " + a.host + ":" + a.port + ". ¿Está Encaje abierto en el PC y el cortafuegos permite la conexión?";
   });
 };

@@ -177,10 +177,21 @@ the native viewer: `adb reverse` and the web viewer need newer versions.
 
 ### Several tablets
 
-There's a single virtual monitor, so one tablet uses it at a time. The other one
-shows *In use on…* with a button to take it over. If one connects on its own
-over WiFi and another over USB, the cable wins, since it's faster; nothing
-automatic overrides what you pick by hand. The PC window shows who's using it.
+When a tablet is already using the monitor, the other one shows *In use on…*
+with two options:
+
+- **Use on this tablet:** takes that monitor over.
+- **Add as another monitor:** each tablet is a separate monitor, with its own
+  resolution and frame rate. Up to 4 in total, GNOME only. Over WiFi they also
+  use ports 8790-8792.
+
+If one connects on its own over WiFi and another over USB, the cable wins, since
+it's faster; nothing automatic overrides what you pick by hand. An extra monitor
+goes away 20 seconds after its tablet leaves.
+
+Each extra monitor makes the desktop GPU draw more. An animated wallpaper is
+drawn on each one, and on integrated graphics it can drop to 15 fps what runs at
+over 50 with a static wallpaper.
 
 ### Mouse and keyboard only (`--input-only`)
 

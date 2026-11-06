@@ -648,6 +648,7 @@ struct Stats {
     since: Instant,
     captured0: u64,
     copy0: u64,
+    sync0: u64,
     frames0: u64,
     bytes0: u64,
     latency0: u64,
@@ -661,6 +662,7 @@ impl Stats {
             since: Instant::now(),
             captured0: capture::CAPTURED.load(Ordering::Relaxed),
             copy0: capture::COPY_US.load(Ordering::Relaxed),
+            sync0: capture::SYNC_US.load(Ordering::Relaxed),
             frames0: out.frames.load(Ordering::Relaxed),
             bytes0: out.bytes.load(Ordering::Relaxed),
             latency0: out.latency_us.load(Ordering::Relaxed),
@@ -676,14 +678,16 @@ impl Stats {
         }
         let captured = capture::CAPTURED.load(Ordering::Relaxed) - self.captured0;
         let copy = capture::COPY_US.load(Ordering::Relaxed) - self.copy0;
+        let sync = capture::SYNC_US.load(Ordering::Relaxed) - self.sync0;
         let frames = out.frames.load(Ordering::Relaxed) - self.frames0;
         let bytes = out.bytes.load(Ordering::Relaxed) - self.bytes0;
         let latency = out.latency_us.load(Ordering::Relaxed) - self.latency0;
         tracing::info!(
-            "captura {:.1} fps (copia {:.1} ms) → envío {:.1} fps (codificar {:.1} ms, \
+            "captura {:.1} fps (copia {:.1} ms, {:.1} esperando al compositor) → envío {:.1} fps (codificar {:.1} ms, \
              listo en {:.1} ms), {:.2} Mbit/s, {} keyframes, edad del frame {:.1} ms",
             captured as f64 / secs,
             copy as f64 / captured.max(1) as f64 / 1000.0,
+            sync as f64 / captured.max(1) as f64 / 1000.0,
             frames as f64 / secs,
             self.encode_us as f64 / self.calls.max(1) as f64 / 1000.0,
             latency as f64 / frames.max(1) as f64 / 1000.0,

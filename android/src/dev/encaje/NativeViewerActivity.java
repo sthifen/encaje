@@ -75,17 +75,22 @@ public class NativeViewerActivity extends Activity implements SurfaceHolder.Call
     static final int RESULT_WEB = RESULT_FIRST_USER;
     /** Resultado: el monitor lo usa otra tablet ({@link #EXTRA_TAKEN}, {@link #EXTRA_BY}). */
     static final int RESULT_TAKEN = RESULT_FIRST_USER + 1;
-    static final String EXTRA_TAKEN = "taken", EXTRA_BY = "by";
-    /** Lo eligió la persona (no es una reconexión automática): se queda con el monitor. */
-    static final String EXTRA_PICK = "pick";
+    static final String EXTRA_TAKEN = "taken", EXTRA_BY = "by", EXTRA_CAN_EXTEND = "can_extend";
+    /** "auto", "pick" (lo eligió la persona: se queda con el monitor) o "extra" (otro monitor). */
+    static final String EXTRA_MODE = "mode";
+    /** Reintentos antes de dar por perdido un monitor extra, que no vuelve si el PC se cierra. */
+    private static final int MAX_EXTRA_RETRIES = 5;
 
     private static final int[] RATES = {144, 120, 90, 75, 60, 48, 30};
 
     private String host;
-    private int port;
+    private volatile int port;
     private String clientId;
-    /** Sólo la primera conexión cuenta como elección; al reconectar ya no. */
-    private volatile boolean pick;
+    /** Sólo la primera conexión cuenta como elección; al reconectar es "auto". */
+    private volatile String mode;
+    /** Está en un monitor extra. */
+    private volatile boolean moved;
+    private int extraRetries;
     private SharedPreferences prefs;
 
     private FrameLayout root;
@@ -137,7 +142,7 @@ public class NativeViewerActivity extends Activity implements SurfaceHolder.Call
         host = getIntent().getStringExtra(EXTRA_HOST);
         port = getIntent().getIntExtra(EXTRA_PORT, 8787);
         prefs = getSharedPreferences("encaje", MODE_PRIVATE);
-        pick = getIntent().getBooleanExtra(EXTRA_PICK, false);
+        mode = getIntent().getStringExtra(EXTRA_MODE);
         clientId = MainActivity.clientId(prefs);
         syncDecoder = Build.VERSION.SDK_INT < ASYNC_DECODER_MIN_SDK
                 || getIntent().getBooleanExtra(EXTRA_SYNC_DECODER, false);
@@ -255,7 +260,10 @@ public class NativeViewerActivity extends Activity implements SurfaceHolder.Call
                     codec.post(() -> onFrame(f));
                 }
             } catch (IOException e) {
-                if (running) {
+                if (running && moved && ++extraRetries >= MAX_EXTRA_RETRIES) {
+                    running = false;
+                    ui.post(this::finish);
+                } else if (running) {
                     setStatus("Desconectado · reintentando…\n" + e.getMessage());
                     sleep(1000);
                 }
@@ -268,7 +276,7 @@ public class NativeViewerActivity extends Activity implements SurfaceHolder.Call
     /** Quién soy, para que el PC sepa a qué tablet le toca el monitor. */
     private String identity() {
         return "?client=" + Uri.encode(clientId) + "&name=" + Uri.encode(Build.MODEL)
-                + "&mode=" + (pick ? "pick" : "auto");
+                + "&mode=" + mode;
     }
 
     private void onServerText(String text) {
@@ -277,12 +285,21 @@ public class NativeViewerActivity extends Activity implements SurfaceHolder.Call
             String type = msg.optString("type");
             if (type.equals("config")) {
                 // Hasta ahora no era dueño: lo que pidió antes no contó.
-                pick = false;
+                mode = "auto";
+                extraRetries = 0;
                 ui.post(this::sendSize);
-            } else if (type.equals("busy") || type.equals("replaced")) {
+            } else if (type.equals("moved")) {
+                // El monitor nuevo es de esta tablet: ahí ya no compite.
+                port = msg.getInt("port");
+                mode = "pick";
+                moved = true;
+                WebSocketClient input = inputWs;
+                if (input != null) input.close();
+            } else if (type.equals("busy") || type.equals("replaced") || type.equals("full")) {
                 running = false;
                 setResult(RESULT_TAKEN, new Intent()
                         .putExtra(EXTRA_TAKEN, type).putExtra(EXTRA_BY, msg.optString("by"))
+                        .putExtra(EXTRA_CAN_EXTEND, msg.optBoolean("extra"))
                         .putExtra(EXTRA_HOST, host).putExtra(EXTRA_PORT, port));
                 ui.post(this::finish);
             }

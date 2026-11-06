@@ -12,6 +12,7 @@
 //! carga) no compiten: ven el vídeo y sólo mandan si no hay dueño.
 
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use tokio::sync::watch;
 
@@ -99,6 +100,20 @@ impl Viewers {
 
     pub fn watch(&self) -> watch::Receiver<Option<Owner>> {
         self.owner.subscribe()
+    }
+
+    /// Termina cuando lleva `grace` sin que nadie use el monitor. El plazo
+    /// deja reconectar a una tablet que pierde la WiFi un momento.
+    pub async fn wait_idle(&self, grace: Duration) {
+        let mut owner = self.watch();
+        loop {
+            if owner.wait_for(Option::is_none).await.is_err() {
+                return;
+            }
+            if tokio::time::timeout(grace, owner.wait_for(Option::is_some)).await.is_err() {
+                return;
+            }
+        }
     }
 }
 

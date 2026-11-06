@@ -25,6 +25,7 @@ use webrtc::peer_connection::RTCSessionDescription;
 use crate::capture::Capture;
 use crate::backend::{InputEvent, VirtualDisplay};
 use crate::encoder::{BitrateControl, ClientRate, EncodedFrame, KeyframeRequest};
+use crate::extras::Extras;
 use crate::viewers::{Link, Owner, Viewers};
 
 const INDEX_HTML: &str = include_str!("../web/index.html");
@@ -44,6 +45,8 @@ pub struct AppState {
     pub auto_fps: Option<u32>,
     /// Quién usa el monitor.
     pub viewers: Arc<Viewers>,
+    /// Los monitores extra que cuelgan de este.
+    pub extras: Arc<Extras>,
 }
 
 /// Quién se conecta (`?client=…&name=…&mode=pick`). El navegador y las apps
@@ -62,6 +65,15 @@ impl ViewerQuery {
     /// Pide el monitor; si lo usa otro, se lo dice al visor y da `Err`.
     async fn claim(&self, s: &AppState, peer: SocketAddr, socket: &mut WebSocket) -> Result<Option<Seat>, ()> {
         let Some(client) = self.client.clone() else { return Ok(None) };
+        if self.mode.as_deref() == Some("extra") {
+            // Ya tiene otro monitor (o no cabe): este visor no sigue aquí.
+            let reply = match s.extras.add(&client).await {
+                Some(port) => json!({ "type": "moved", "port": port }).to_string().into(),
+                None => notice_text("full", "", false),
+            };
+            let _ = socket.send(Message::Text(reply)).await;
+            return Err(());
+        }
         // Por `adb reverse` el visor llega desde este mismo equipo.
         let link = if peer.ip().is_loopback() { Link::Usb } else { Link::Wifi };
         let name = self.name.clone().unwrap_or_else(|| peer.ip().to_string());
@@ -69,10 +81,20 @@ impl ViewerQuery {
             Ok(session) => Ok(Some(Seat { client, session })),
             Err(by) => {
                 tracing::info!("{name} espera: el monitor lo usa {by}");
-                let _ = socket.send(notice("busy", &by)).await;
+                let _ = socket.send(notice("busy", &by, s.extras.supported())).await;
                 Err(())
             }
         }
+    }
+}
+
+/// Lo que dice la ventana del PC sobre quién usa los monitores.
+fn in_use_label(owner: Option<String>, extras: usize) -> Option<String> {
+    match (owner, extras) {
+        (None, 0) => None,
+        (Some(owner), 0) => Some(owner),
+        (owner, 1) => Some(format!("{} y 1 monitor más", owner.unwrap_or_else(|| "ninguna tablet".into()))),
+        (owner, n) => Some(format!("{} y {n} monitores más", owner.unwrap_or_else(|| "ninguna tablet".into()))),
     }
 }
 
@@ -83,11 +105,17 @@ struct Seat {
 }
 
 pub async fn serve(state: AppState, listener: tokio::net::TcpListener) -> anyhow::Result<()> {
-    let mut owners = state.viewers.watch();
+    let (owners, extras) = (state.viewers.watch(), state.extras.clone());
     tokio::spawn(async move {
-        while owners.changed().await.is_ok() {
-            let label = owners.borrow_and_update().as_ref().map(Owner::label);
-            crate::events::viewer(label);
+        let mut shown = None;
+        loop {
+            let owner = owners.borrow().as_ref().map(Owner::label);
+            let label = in_use_label(owner, extras.count().await);
+            if label != shown {
+                crate::events::viewer(label.clone());
+                shown = label;
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
         }
     });
     let app = Router::new()
@@ -160,9 +188,14 @@ async fn ws_video(
     })
 }
 
-/// Aviso a un visor de que no le toca: `busy` o `replaced`.
-fn notice(kind: &str, by: &str) -> Message {
-    Message::Text(json!({ "type": kind, "by": by }).to_string().into())
+/// Aviso a un visor de que no le toca: `busy`, `replaced` o `full`. `extra`:
+/// puede pedir otro monitor.
+fn notice(kind: &str, by: &str, extra: bool) -> Message {
+    Message::Text(notice_text(kind, by, extra))
+}
+
+fn notice_text(kind: &str, by: &str, extra: bool) -> axum::extract::ws::Utf8Bytes {
+    json!({ "type": kind, "by": by, "extra": extra }).to_string().into()
 }
 
 /// Espera a que el monitor pase a otro y dice a quién (`None` si fue a otra
@@ -203,7 +236,7 @@ async fn stream_video(mut socket: WebSocket, s: Arc<AppState>, seat: Option<&Sea
             by = lost_seat(&mut owners, seat) => {
                 if let Some(by) = by {
                     tracing::info!("el monitor pasa a {by}");
-                    let _ = socket.send(notice("replaced", &by)).await;
+                    let _ = socket.send(notice("replaced", &by, s.extras.supported())).await;
                 }
                 return;
             }
@@ -429,7 +462,7 @@ async fn ws_input(
                 by = lost_seat(&mut owners, seat.as_ref()) => {
                     if let Some(by) = by {
                         tracing::info!("el monitor pasa a {by}");
-                        let _ = socket.send(notice("replaced", &by)).await;
+                        let _ = socket.send(notice("replaced", &by, s.extras.supported())).await;
                     }
                     break;
                 }
