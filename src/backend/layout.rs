@@ -4,8 +4,10 @@
 //! cada combinación de monitores físicos (no es lo mismo el portátil solo
 //! que con el HDMI).
 
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::os::fd::AsRawFd;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -82,7 +84,10 @@ impl VirtualMonitor {
 pub fn layout_key<'a>(connectors: impl IntoIterator<Item = &'a str>) -> String {
     let mut c: Vec<&str> = connectors.into_iter().collect();
     c.sort();
-    c.join("+")
+    match EXTRA_MONITOR.load(Ordering::Relaxed) {
+        0 => c.join("+"),
+        n => format!("{}#{n}", c.join("+")),
+    }
 }
 
 // ---- Posiciones guardadas ----
@@ -101,6 +106,13 @@ fn layout_file() -> PathBuf {
     base.join("encaje").join("layout.json")
 }
 
+/// Monitor extra que es este proceso: cada uno guarda su propia posición.
+static EXTRA_MONITOR: AtomicU8 = AtomicU8::new(0);
+
+pub fn set_extra_monitor(n: u8) {
+    EXTRA_MONITOR.store(n, Ordering::Relaxed);
+}
+
 pub fn load_offsets() -> HashMap<String, Offset> {
     std::fs::read(layout_file())
         .ok()
@@ -109,19 +121,30 @@ pub fn load_offsets() -> HashMap<String, Offset> {
 }
 
 pub fn save_offset(key: &str, offset: Offset) {
-    let mut all = load_offsets();
-    if all.get(key) == Some(&offset) {
+    if load_offsets().get(key) == Some(&offset) {
         return;
     }
-    all.insert(key.to_owned(), offset);
     let path = layout_file();
     let _ = std::fs::create_dir_all(path.parent().unwrap());
-    match serde_json::to_vec_pretty(&all) {
-        Ok(ref json) if std::fs::write(&path, json).is_ok() => {
-            tracing::info!("posición de la tablet guardada ({key}: {}, {})", offset.dx, offset.dy)
-        }
-        _ => tracing::warn!("no se pudo guardar {}", path.display()),
+    // Cada monitor extra es un proceso: sin el cerrojo se pisarían entre sí.
+    let lock = std::fs::File::create(path.with_extension("lock"));
+    if let Ok(f) = &lock {
+        unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) };
     }
+    let mut all = load_offsets();
+    all.insert(key.to_owned(), offset);
+    match serde_json::to_vec_pretty(&all).ok().filter(|json| write_atomically(&path, json).is_ok()) {
+        Some(_) => tracing::info!("posición de la tablet guardada ({key}: {}, {})", offset.dx, offset.dy),
+        None => tracing::warn!("no se pudo guardar {}", path.display()),
+    }
+}
+
+/// Quien lea a la vez ve el archivo entero, viejo o nuevo: uno a medias se
+/// leería como vacío y se perderían las posiciones guardadas.
+fn write_atomically(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, data)?;
+    std::fs::rename(tmp, path)
 }
 
 /// Busca la posición válida (pegada a algún monitor, sin solaparse) más

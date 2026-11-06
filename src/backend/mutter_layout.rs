@@ -15,7 +15,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
@@ -141,11 +141,18 @@ fn desired(before: &State, now: &State, virt: &Placed, offset: Option<Offset>) -
         .placed
         .iter()
         .filter(|p| now.modes.contains_key(&p.connector) && p.connector != virt.connector)
-        .filter(|p| p.vendor != VIRTUAL_VENDOR || now.find(&p.connector).is_some())
+        .filter(|p| p.vendor != VIRTUAL_VENDOR)
         .cloned()
         .collect();
     if out.is_empty() {
         return now.placed.clone();
+    }
+    // Pegados a lo que haya: si las pantallas vuelven a su sitio, los otros
+    // virtuales quedarían sueltos y Mutter rechazaría todo.
+    for other in other_virtuals(now, &virt.connector) {
+        let rects: Vec<Rect> = out.iter().map(|p| p.rect).collect();
+        let (x, y) = layout::snap(&rects, other.rect.w, other.rect.h, (other.rect.x, other.rect.y));
+        out.push(Placed { rect: Rect { x, y, ..other.rect }, ..other });
     }
     let rects: Vec<Rect> = out.iter().map(|p| p.rect).collect();
     let primary = out.iter().find(|p| p.primary).unwrap_or(&out[0]).rect;
@@ -176,11 +183,36 @@ fn without_virtual(baseline: &State, now: &State) -> Vec<Placed> {
         .placed
         .iter()
         .filter(|p| now.modes.contains_key(&p.connector))
-        .filter(|p| p.vendor != VIRTUAL_VENDOR || now.find(&p.connector).is_some())
+        .filter(|p| p.vendor != VIRTUAL_VENDOR)
         .cloned()
         .collect();
+    out.extend(other_virtuals(now, ""));
     normalize(&mut out);
     out
+}
+
+/// Los demás monitores virtuales, tal como están: de cada uno cuida el proceso
+/// que lo creó, pero hay que contar con ellos o Mutter rechaza la disposición.
+fn other_virtuals(now: &State, mine: &str) -> Vec<Placed> {
+    let mut others: Vec<Placed> =
+        now.placed.iter().filter(|p| p.vendor == VIRTUAL_VENDOR && p.connector != mine).cloned().collect();
+    others.sort_by_key(|p| (p.rect.x, p.rect.y));
+    others
+}
+
+/// Los monitores virtuales que hay ahora.
+fn virtuals(state: &State) -> Vec<String> {
+    let mut names: Vec<String> =
+        state.placed.iter().filter(|p| p.vendor == VIRTUAL_VENDOR).map(|p| p.connector.clone()).collect();
+    names.sort();
+    names
+}
+
+/// Lo que importa a quien cuida `virt`: las pantallas físicas y su monitor.
+/// Los otros virtuales cambian por su cuenta, y eso no lo hizo el usuario.
+fn same_for(virt: &str, a: &[Placed], b: &[Placed]) -> bool {
+    let own = |l: &[Placed]| l.iter().filter(|p| p.vendor != VIRTUAL_VENDOR || p.connector == virt).cloned().collect::<Vec<_>>();
+    same_layout(&own(a), &own(b))
 }
 
 fn same_layout(a: &[Placed], b: &[Placed]) -> bool {
@@ -201,6 +233,10 @@ async fn apply(p: &DisplayConfigProxy<'_>, now: &State, layout: &[Placed]) -> Re
         .await
         .context("Mutter rechazó la disposición de monitores")
 }
+
+/// Lo que tardan en asentarse las pantallas tras crearse o quitarse otro
+/// monitor virtual.
+const OTHERS_SETTLE: Duration = Duration::from_secs(3);
 
 /// Lo que `keep` comparte con `restore`.
 struct Shared {
@@ -287,12 +323,26 @@ async fn keep_inner(mut before: State, tx: watch::Sender<Option<VirtualMonitor>>
     shared.lock().unwrap().virt = Some(virt.clone());
     let mut applied: Option<Vec<Placed>> = None;
     let mut size = None;
+    let mut seen_virtuals = Vec::new();
+    let mut settle_until = Instant::now();
     loop {
         let now = read(&p).await?;
         if let Some(v) = now.find(&virt).cloned() {
             let key = before.layout_key();
             let resized = size != Some((v.rect.w, v.rect.h));
-            if resized {
+            // Al crearse o quitarse otro monitor virtual, Mutter vuelve a su
+            // disposición por defecto (enciende lo apagado y lo recoloca
+            // todo). Eso no lo hiciste tú: hay que reponer la tuya.
+            let others_changed = seen_virtuals != virtuals(&now);
+            seen_virtuals = virtuals(&now);
+            if others_changed {
+                settle_until = Instant::now() + OTHERS_SETTLE;
+            }
+            // Mientras los demás procesos colocan su monitor, lo que se mueva
+            // tampoco es cosa tuya.
+            let settling = Instant::now() < settle_until;
+            let moved_meanwhile = settling && applied.as_deref().is_some_and(|a| !same_for(&virt, a, &now.placed));
+            if resized || others_changed || moved_meanwhile {
                 size = Some((v.rect.w, v.rect.h));
                 let layout = desired(&before, &now, &v, layout::load_offsets().get(&key).copied());
                 if same_layout(&layout, &now.placed) {
@@ -321,14 +371,14 @@ async fn keep_inner(mut before: State, tx: watch::Sender<Option<VirtualMonitor>>
                     while let Ok(Some(_)) = tokio::time::timeout(Duration::from_millis(150), changes.next()).await {}
                     continue;
                 }
-            } else if applied.as_deref().is_none_or(|a| !same_layout(a, &now.placed)) {
+            } else if applied.as_deref().is_none_or(|a| !same_for(&virt, a, &now.placed)) {
                 // Lo cambiaste en Configuración: la nueva disposición pasa a
                 // ser la de referencia (incluido lo que enciendas o apagues).
                 before = State { placed: now.placed.iter().filter(|m| m.connector != virt).cloned().collect(), ..now.clone() };
                 shared.lock().unwrap().baseline = before.clone();
                 applied = Some(now.placed.clone());
             }
-            if let Some(pr) = now.placed.iter().find(|m| m.primary && m.vendor != VIRTUAL_VENDOR) {
+            if let Some(pr) = now.placed.iter().find(|m| m.primary && m.vendor != VIRTUAL_VENDOR).filter(|_| !settling) {
                 layout::save_offset(&before.layout_key(), Offset { dx: v.rect.x - pr.rect.x, dy: v.rect.y - pr.rect.y });
             }
             let info = describe(&now, &virt);
@@ -361,6 +411,31 @@ mod tests {
     fn state(placed: Vec<Placed>) -> State {
         let modes = placed.iter().map(|p| (p.connector.clone(), "m".to_owned())).collect();
         State { serial: 1, placed, modes }
+    }
+
+    #[test]
+    fn another_virtual_monitor_does_not_undo_your_screens() {
+        // Otro monitor virtual hizo a Mutter encender DP-3 y moverlo todo.
+        let before = state(vec![placed("eDP-1", 0, 0, 1920, 1080, false), placed("HDMI-1", 1920, 0, 1920, 1080, true)]);
+        let now = state(vec![
+            placed("HDMI-1", 0, 0, 1920, 1080, true),
+            placed("DP-3", 1920, 0, 640, 480, false),
+            placed("eDP-1", 2560, 0, 1920, 1080, false),
+            placed("Meta-0", 4480, 0, 1400, 876, false),
+            placed("Meta-1", 5880, 0, 960, 600, false),
+        ]);
+        let mine = now.find("Meta-0").unwrap().clone();
+        let layout = desired(&before, &now, &mine, None);
+        let at = |c: &str| layout.iter().find(|p| p.connector == c).map(|p| (p.rect.x, p.rect.y));
+        assert_eq!(at("eDP-1"), Some((0, 0)));
+        assert_eq!(at("HDMI-1"), Some((1920, 0)));
+        assert_eq!(at("DP-3"), None);
+        let rects: Vec<Rect> = layout.iter().map(|p| p.rect).collect();
+        assert_eq!(rects.len(), 4);
+        for (i, r) in rects.iter().enumerate() {
+            let touches = rects.iter().enumerate().any(|(j, o)| i != j && (r.right() == o.x || o.right() == r.x));
+            assert!(touches, "monitor suelto: {r:?}");
+        }
     }
 
     #[test]

@@ -19,6 +19,9 @@ use pw::spa::pod::Pod;
 
 /// Frames recibidos de PipeWire (para estadísticas).
 pub static CAPTURED: AtomicU64 = AtomicU64::new(0);
+/// De ese tiempo, lo que se esperó a que el compositor terminara de dibujar
+/// el búfer (el resto es la copia en sí), en microsegundos.
+pub static SYNC_US: AtomicU64 = AtomicU64::new(0);
 /// Tiempo acumulado copiando búferes de PipeWire, en microsegundos.
 pub static COPY_US: AtomicU64 = AtomicU64::new(0);
 
@@ -424,6 +427,7 @@ fn run(
             if let Some(fd) = dmabuf {
                 dmabuf_sync(fd, false);
             }
+            SYNC_US.fetch_add(captured.elapsed().as_micros() as u64, Ordering::Relaxed);
             let data = if stride == row {
                 Bytes::copy_from_slice(&src[..row * h])
             } else {

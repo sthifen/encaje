@@ -167,10 +167,21 @@ el visor nativo: `adb reverse` y el visor web necesitan versiones más nuevas.
 
 ### Varias tablets
 
-Hay un solo monitor virtual, así que lo usa una tablet a la vez. La otra muestra
-*En uso en…* con un botón para quedárselo. Si una entra sola por WiFi y otra
-por USB, gana el cable, que es más rápido; lo que elijas a mano no te lo quita
-ninguna conexión automática. La ventana del PC dice quién lo está usando.
+Cuando una tablet ya usa el monitor, la otra muestra *En uso en…* con dos
+opciones:
+
+- **Usar en esta tablet:** se queda con ese monitor.
+- **Añadir como otro monitor:** cada tablet es un monitor distinto, con su
+  resolución y sus fps. Hasta 4 en total, sólo en GNOME. Por WiFi usan además
+  los puertos 8790-8792.
+
+Si una entra sola por WiFi y otra por USB, gana el cable, que es más rápido; lo
+que elijas a mano no te lo quita ninguna conexión automática. Un monitor extra
+desaparece solo 20 segundos después de que se vaya su tablet.
+
+Cada monitor más hace dibujar más a la GPU del escritorio. Un fondo de pantalla
+animado se dibuja en cada uno, y en una gráfica integrada puede dejar a 15 fps
+lo que con un fondo fijo va a más de 50.
 
 ### Sólo ratón y teclado (`--input-only`)
 

@@ -14,6 +14,7 @@ mod clipboard;
 mod diagnose;
 mod encoder;
 mod events;
+mod extras;
 mod grab_window;
 mod gui;
 mod guide;
@@ -80,6 +81,10 @@ struct Args {
     /// de rendimiento en contenedores)
     #[arg(long, visible_alias = "test-source", hide = true)]
     fuente_prueba: bool,
+    /// Este proceso es un monitor extra de otro (uso interno); el número
+    /// distingue su posición guardada
+    #[arg(long, hide = true)]
+    extra_monitor: Option<u8>,
     /// Escribir eventos en JSON para la interfaz (líneas que empiezan por @)
     #[arg(long, hide = true)]
     events: bool,
@@ -87,6 +92,17 @@ struct Args {
     #[arg(long, hide = true)]
     overlay: Option<String>,
 }
+
+/// Un monitor extra sobra cuando su tablet deja de usarlo.
+async fn abandoned(viewers: &viewers::Viewers, extra: bool) {
+    if !extra {
+        return std::future::pending().await;
+    }
+    viewers.wait_idle(EXTRA_MONITOR_GRACE).await;
+}
+
+/// Lo que espera un monitor extra a que vuelva su tablet.
+const EXTRA_MONITOR_GRACE: std::time::Duration = std::time::Duration::from_secs(20);
 
 fn main() -> Result<()> {
     // RUST_LOG permite más detalle, p. ej. RUST_LOG=debug. El registro va a
@@ -171,6 +187,9 @@ async fn serve(args: Args) -> Result<()> {
     let env = backend::Environment::detect();
     tracing::info!("sesión: {} / escritorio: {}", env.session_type, env.desktop);
 
+    if let Some(n) = args.extra_monitor {
+        backend::layout::set_extra_monitor(n);
+    }
     let display: Arc<dyn backend::VirtualDisplay> = if args.fuente_prueba {
         Arc::new(backend::test::TestDisplay::new())
     } else {
@@ -226,9 +245,13 @@ async fn serve(args: Args) -> Result<()> {
         }
     });
 
+    let can_extend = args.extra_monitor.is_none()
+        && (args.fuente_prueba || env.kind_or_probe().await == Some(backend::Desktop::Gnome));
     if !args.no_usb {
-        tokio::spawn(adb::watch(args.port));
+        let extra_ports = if can_extend { extras::ports(args.port).to_vec() } else { Vec::new() };
+        tokio::spawn(adb::watch(args.port, extra_ports));
     }
+    let viewers = Arc::new(viewers::Viewers::new());
 
     let state = server::AppState {
         frames: frames_tx,
@@ -239,7 +262,8 @@ async fn serve(args: Args) -> Result<()> {
         display: display.clone(),
         auto_size: fixed.is_none(),
         auto_fps: args.fps.is_none().then_some(args.max_fps),
-        viewers: Arc::new(viewers::Viewers::new()),
+        viewers: viewers.clone(),
+        extras: Arc::new(extras::Extras::new(args.port, can_extend)),
     };
     for ip in lan::addresses() {
         tracing::info!("visor por WiFi en http://{ip}:{}", addr.port());
@@ -252,6 +276,10 @@ async fn serve(args: Args) -> Result<()> {
             Ok(false)
         }
         _ = display.closed() => Ok(true),
+        _ = abandoned(&viewers, args.extra_monitor.is_some()) => {
+            tracing::info!("su tablet se fue: se quita este monitor");
+            Ok(false)
+        }
     };
     display.stop().await;
     if closed? {

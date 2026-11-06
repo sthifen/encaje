@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use tokio::process::Command;
 
-pub async fn watch(port: u16) {
+pub async fn watch(port: u16, extra_ports: Vec<u16>) {
     if Command::new("adb").arg("version").output().await.is_err() {
         tracing::warn!("adb no encontrado: el modo USB está desactivado (instala android-tools)");
         return;
@@ -39,8 +39,20 @@ pub async fn watch(port: u16) {
             if fresh || opened.insert(serial.clone()) {
                 open_app(&serial).await;
             }
+            forward_extra_ports(&serial, &extra_ports).await;
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+}
+
+/// Los monitores extra también han de alcanzarse por el cable.
+async fn forward_extra_ports(serial: &str, ports: &[u16]) {
+    let Some(list) = adb(&["-s", serial, "reverse", "--list"]).await else { return };
+    for port in ports {
+        let spec = format!("tcp:{port}");
+        if !list.lines().any(|l| l.split_whitespace().nth(1) == Some(spec.as_str())) {
+            adb(&["-s", serial, "reverse", &spec, &spec]).await;
+        }
     }
 }
 
