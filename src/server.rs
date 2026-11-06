@@ -13,18 +13,19 @@ use std::time::{Duration, Instant};
 use axum::Json;
 use axum::Router;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{ConnectInfo, State};
+use axum::extract::{ConnectInfo, Query, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use bytes::{BufMut, BytesMut};
 use serde_json::json;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, watch};
 use webrtc::peer_connection::RTCSessionDescription;
 
 use crate::capture::Capture;
 use crate::backend::{InputEvent, VirtualDisplay};
 use crate::encoder::{BitrateControl, ClientRate, EncodedFrame, KeyframeRequest};
+use crate::viewers::{Link, Owner, Viewers};
 
 const INDEX_HTML: &str = include_str!("../web/index.html");
 
@@ -41,9 +42,54 @@ pub struct AppState {
     /// La frecuencia sigue a la pantalla del visor (si no se fijó con --fps),
     /// hasta este máximo.
     pub auto_fps: Option<u32>,
+    /// Quién usa el monitor.
+    pub viewers: Arc<Viewers>,
+}
+
+/// Quién se conecta (`?client=…&name=…&mode=pick`). El navegador y las apps
+/// antiguas no lo dicen: ver `viewers.rs`.
+#[derive(serde::Deserialize)]
+struct ViewerQuery {
+    client: Option<String>,
+    name: Option<String>,
+    mode: Option<String>,
+    /// El puesto lo ocupa esta conexión de entrada y no la de vídeo: así lo
+    /// hace el visor web, que por WebRTC no tiene una conexión de vídeo.
+    seat: Option<String>,
+}
+
+impl ViewerQuery {
+    /// Pide el monitor; si lo usa otro, se lo dice al visor y da `Err`.
+    async fn claim(&self, s: &AppState, peer: SocketAddr, socket: &mut WebSocket) -> Result<Option<Seat>, ()> {
+        let Some(client) = self.client.clone() else { return Ok(None) };
+        // Por `adb reverse` el visor llega desde este mismo equipo.
+        let link = if peer.ip().is_loopback() { Link::Usb } else { Link::Wifi };
+        let name = self.name.clone().unwrap_or_else(|| peer.ip().to_string());
+        match s.viewers.claim(&client, &name, link, self.mode.as_deref() == Some("pick")) {
+            Ok(session) => Ok(Some(Seat { client, session })),
+            Err(by) => {
+                tracing::info!("{name} espera: el monitor lo usa {by}");
+                let _ = socket.send(notice("busy", &by)).await;
+                Err(())
+            }
+        }
+    }
+}
+
+/// Este visor es el dueño del monitor.
+struct Seat {
+    client: String,
+    session: u64,
 }
 
 pub async fn serve(state: AppState, listener: tokio::net::TcpListener) -> anyhow::Result<()> {
+    let mut owners = state.viewers.watch();
+    tokio::spawn(async move {
+        while owners.changed().await.is_ok() {
+            let label = owners.borrow_and_update().as_ref().map(Owner::label);
+            crate::events::viewer(label);
+        }
+    });
     let app = Router::new()
         .route("/", get(index))
         .route("/info", get(info))
@@ -72,7 +118,7 @@ async fn info(State(s): State<Arc<AppState>>) -> impl IntoResponse {
     // CORS abierto: el lanzador de la app Android consulta desde file://.
     (
         [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")],
-        Json(json!({ "width": s.capture.geometry.get().0, "height": s.capture.geometry.get().1, "fps": s.capture.fps.load(std::sync::atomic::Ordering::Relaxed), "auto_size": s.auto_size })),
+        Json(json!({ "width": s.capture.geometry.get().0, "height": s.capture.geometry.get().1, "fps": s.capture.fps.load(std::sync::atomic::Ordering::Relaxed), "auto_size": s.auto_size, "name": crate::lan::hostname(), "id": crate::lan::server_id() })),
     )
 }
 
@@ -99,14 +145,38 @@ async fn ws_video(
     ws: WebSocketUpgrade,
     State(s): State<Arc<AppState>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Query(q): Query<ViewerQuery>,
 ) -> Response {
-    ws.on_upgrade(move |socket| async move {
+    ws.on_upgrade(move |mut socket| async move {
+        let Ok(seat) = q.claim(&s, peer, &mut socket).await else { return };
         tracing::info!("visor WebSocket conectado: {peer}");
         crate::events::connected();
-        stream_video(socket, s).await;
+        stream_video(socket, s.clone(), seat.as_ref()).await;
         tracing::info!("visor WebSocket desconectado: {peer}");
+        if let Some(seat) = seat {
+            s.viewers.release(seat.session);
+        }
         crate::events::emit("disconnected");
     })
+}
+
+/// Aviso a un visor de que no le toca: `busy` o `replaced`.
+fn notice(kind: &str, by: &str) -> Message {
+    Message::Text(json!({ "type": kind, "by": by }).to_string().into())
+}
+
+/// Espera a que el monitor pase a otro y dice a quién (`None` si fue a otra
+/// conexión de este mismo visor). Sin dueño propio, no termina nunca.
+async fn lost_seat(owners: &mut watch::Receiver<Option<Owner>>, seat: Option<&Seat>) -> Option<String> {
+    let Some(seat) = seat else { return std::future::pending().await };
+    loop {
+        if let Some(o) = owners.borrow_and_update().as_ref().filter(|o| o.session != seat.session) {
+            return (o.client != seat.client).then(|| o.name.clone());
+        }
+        if owners.changed().await.is_err() {
+            return std::future::pending().await;
+        }
+    }
 }
 
 /// Cada mensaje binario: [flags u8 (bit0 = keyframe)][pts µs u64 BE][Annex-B].
@@ -115,7 +185,7 @@ async fn ws_video(
 /// que de verdad atraviesa el enlace (adb por USB, WiFi…) y se evita encolar:
 /// si hay demasiado en vuelo se saltan frames y se baja el bitrate, en lugar
 /// de acumular segundos de retraso en búferes de TCP/adb.
-async fn stream_video(mut socket: WebSocket, s: Arc<AppState>) {
+async fn stream_video(mut socket: WebSocket, s: Arc<AppState>, seat: Option<&Seat>) {
     let (width, height) = s.capture.geometry.get();
     let hello = json!({ "type": "config", "width": width, "height": height, "fps": s.capture.fps.load(std::sync::atomic::Ordering::Relaxed) });
     if socket.send(Message::Text(hello.to_string().into())).await.is_err() {
@@ -127,8 +197,16 @@ async fn stream_video(mut socket: WebSocket, s: Arc<AppState>) {
     let mut synced = false;
     let mut key_requested = true;
     let mut last_stats = Instant::now() - Duration::from_secs(60);
+    let mut owners = s.viewers.watch();
     loop {
         tokio::select! {
+            by = lost_seat(&mut owners, seat) => {
+                if let Some(by) = by {
+                    tracing::info!("el monitor pasa a {by}");
+                    let _ = socket.send(notice("replaced", &by)).await;
+                }
+                return;
+            }
             msg = socket.recv() => match msg {
                 Some(Ok(Message::Close(_))) | None | Some(Err(_)) => return,
                 Some(Ok(Message::Text(t))) => {
@@ -332,26 +410,59 @@ impl Flow {
     }
 }
 
-async fn ws_input(ws: WebSocketUpgrade, State(s): State<Arc<AppState>>) -> Response {
+async fn ws_input(
+    ws: WebSocketUpgrade,
+    State(s): State<Arc<AppState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Query(q): Query<ViewerQuery>,
+) -> Response {
     ws.on_upgrade(move |mut socket| async move {
-        while let Some(Ok(msg)) = socket.recv().await {
-            if let Message::Text(t) = msg {
-                if let Ok(Resize { w, h, hz }) = serde_json::from_str::<Resize>(&t) {
-                    request_size(&s, w, h);
-                    if let Some(hz) = hz {
-                        request_fps(&s, hz);
+        let mut seat = None;
+        if q.seat.is_some() {
+            let Ok(claimed) = q.claim(&s, peer, &mut socket).await else { return };
+            seat = claimed;
+            let _ = socket.send(Message::Text(json!({ "type": "seated" }).to_string().into())).await;
+        }
+        let mut owners = s.viewers.watch();
+        loop {
+            tokio::select! {
+                by = lost_seat(&mut owners, seat.as_ref()) => {
+                    if let Some(by) = by {
+                        tracing::info!("el monitor pasa a {by}");
+                        let _ = socket.send(notice("replaced", &by)).await;
                     }
-                    continue;
+                    break;
                 }
-                match serde_json::from_str::<InputEvent>(&t) {
-                    Ok(ev) => {
-                        let _ = s.input.send(ev);
-                    }
-                    Err(e) => tracing::debug!("evento de entrada inválido {t}: {e}"),
-                }
+                msg = socket.recv() => match msg {
+                    Some(Ok(Message::Text(t))) => on_input(&s, q.client.as_deref(), &t),
+                    Some(Ok(_)) => {}
+                    _ => break,
+                },
             }
         }
+        if let Some(seat) = seat {
+            s.viewers.release(seat.session);
+        }
     })
+}
+
+fn on_input(s: &AppState, client: Option<&str>, text: &str) {
+    if !s.viewers.may_control(client) {
+        return;
+    }
+    if let Ok(Resize { w, h, hz }) = serde_json::from_str::<Resize>(text) {
+        request_size(s, w, h);
+        if let Some(hz) = hz {
+            request_fps(s, hz);
+        }
+        return;
+    }
+    match serde_json::from_str::<InputEvent>(text) {
+        Ok(ev) => {
+            let _ = s.input.send(ev);
+        }
+        Err(e) => tracing::debug!("evento de entrada inválido {text}: {e}"),
+    }
 }
 
 /// `{"t":"resize","w":…,"h":…}`: el visor pide un monitor de ese tamaño (su

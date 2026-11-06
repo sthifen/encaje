@@ -19,10 +19,12 @@ mod gui;
 mod guide;
 mod h264;
 mod input_only;
+mod lan;
 mod memguard;
 mod overlay;
 mod rtc_peer;
 mod server;
+mod viewers;
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -237,8 +239,11 @@ async fn serve(args: Args) -> Result<()> {
         display: display.clone(),
         auto_size: fixed.is_none(),
         auto_fps: args.fps.is_none().then_some(args.max_fps),
+        viewers: Arc::new(viewers::Viewers::new()),
     };
-    tracing::info!("visor en http://{addr} (WiFi: usa la IP de este equipo)");
+    for ip in lan::addresses() {
+        tracing::info!("visor por WiFi en http://{ip}:{}", addr.port());
+    }
 
     let closed = tokio::select! {
         r = server::serve(state, listener) => r.map(|_| false),

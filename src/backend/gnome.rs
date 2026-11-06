@@ -42,6 +42,7 @@ trait RemoteDesktopSession {
     fn start(&self) -> zbus::Result<()>;
     fn stop(&self) -> zbus::Result<()>;
     fn notify_pointer_motion_absolute(&self, stream: &str, x: f64, y: f64) -> zbus::Result<()>;
+    fn notify_pointer_motion_relative(&self, dx: f64, dy: f64) -> zbus::Result<()>;
     fn notify_pointer_button(&self, button: i32, state: bool) -> zbus::Result<()>;
     fn notify_pointer_axis_discrete(&self, axis: u32, steps: i32) -> zbus::Result<()>;
     fn notify_touch_down(&self, stream: &str, slot: u32, x: f64, y: f64) -> zbus::Result<()>;
@@ -87,6 +88,8 @@ pub struct GnomeDisplay {
     closed: watch::Receiver<bool>,
     keeper: Mutex<Option<mutter_layout::Keeper>>,
     placed: watch::Receiver<Option<VirtualMonitor>>,
+    /// Dedos apoyados en la tablet ahora mismo.
+    fingers: Mutex<u32>,
 }
 
 impl GnomeDisplay {
@@ -161,6 +164,7 @@ impl GnomeDisplay {
             closed,
             placed: keeper.placed.clone(),
             keeper: Mutex::new(Some(keeper)),
+            fingers: Mutex::new(0),
         })
     }
 }
@@ -209,6 +213,7 @@ impl VirtualDisplay for GnomeDisplay {
                 }
             }
             InputEvent::TouchDown { id, x, y } => {
+                *self.fingers.lock().unwrap() += 1;
                 self.remote
                     .notify_touch_down(s, id, clamp01(x) * w, clamp01(y) * h)
                     .await?
@@ -218,7 +223,20 @@ impl VirtualDisplay for GnomeDisplay {
                     .notify_touch_motion(s, id, clamp01(x) * w, clamp01(y) * h)
                     .await?
             }
-            InputEvent::TouchUp { id } => self.remote.notify_touch_up(id).await?,
+            InputEvent::TouchUp { id } => {
+                self.remote.notify_touch_up(id).await?;
+                // Mutter oculta el puntero al primer toque y no lo devuelve
+                // hasta que el ratón se mueve, y en la tablet parecería que
+                // se perdió. Un movimiento nulo lo devuelve sin desplazarlo.
+                let none_left = {
+                    let mut fingers = self.fingers.lock().unwrap();
+                    *fingers = fingers.saturating_sub(1);
+                    *fingers == 0
+                };
+                if none_left {
+                    self.remote.notify_pointer_motion_relative(0.0, 0.0).await?;
+                }
+            }
             InputEvent::Key { keysym, down } => {
                 self.remote.notify_keyboard_keysym(keysym, down).await?
             }

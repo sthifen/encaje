@@ -165,8 +165,22 @@ simulated 7 Mbit/s link the queueing delay drops from ~3 s to ~11 ms).
 
 ### Phone or tablet over WiFi
 
-In the app, type the PC's IP in the *WiFi* box, or open
-`http://PC-IP:8787` in any browser. It uses WebRTC.
+Open Encaje on the PC and the app on the tablet: the PC shows up in the list
+by name. Tap it to connect; next time it connects on its own.
+
+If it doesn't show up (some networks isolate their devices), type the address
+shown in Encaje's window on the PC, or open it in any browser. Browsers use
+WebRTC.
+
+The app runs on **Android 4.4 and newer**. Before Android 5 it's WiFi only with
+the native viewer: `adb reverse` and the web viewer need newer versions.
+
+### Several tablets
+
+There's a single virtual monitor, so one tablet uses it at a time. The other one
+shows *In use on…* with a button to take it over. If one connects on its own
+over WiFi and another over USB, the cable wins, since it's faster; nothing
+automatic overrides what you pick by hand. The PC window shows who's using it.
 
 ### Mouse and keyboard only (`--input-only`)
 

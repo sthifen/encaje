@@ -16,7 +16,7 @@
         <activity
             android:name=".MainActivity"
             android:exported="true"
-            android:screenOrientation="sensorLandscape"
+            android:screenOrientation="fullUser"
             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|keyboard|smallestScreenSize|uiMode"
             android:windowSoftInputMode="adjustNothing"
             android:launchMode="singleTop">
@@ -30,7 +30,7 @@
         <activity
             android:name=".NativeViewerActivity"
             android:exported="false"
-            android:screenOrientation="sensorLandscape"
+            android:screenOrientation="fullUser"
             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|keyboard|smallestScreenSize|uiMode|navigation"
             android:windowSoftInputMode="adjustNothing|stateHidden"
             android:theme="@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen" />

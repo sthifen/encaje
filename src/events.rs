@@ -5,6 +5,7 @@
 //!   @{"t":"connected","monitor":{…}}      tablet o visor conectado; `monitor`
 //!                                         dice dónde está (para la animación)
 //!   @{"t":"disconnected"}
+//!   @{"t":"viewer","label":"SM-X800 por USB"}   quién usa el monitor (o null)
 
 use std::io::Write;
 use std::sync::Mutex;
@@ -25,6 +26,11 @@ pub fn enable() {
 /// Dónde está el monitor virtual, para adjuntarlo a `connected`.
 pub fn set_monitor(rx: watch::Receiver<Option<VirtualMonitor>>) {
     *MONITOR.lock().unwrap() = Some(rx);
+}
+
+/// Quién usa el monitor ahora.
+pub fn viewer(label: Option<String>) {
+    send(serde_json::json!({ "t": "viewer", "label": label }));
 }
 
 pub fn emit(kind: &str) {
