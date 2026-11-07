@@ -52,6 +52,7 @@
     <button data-scale="custom">Otra…</button>
   </div>
   <button data-act="reconnect">Reconectar</button>
+  <button data-act="disconnect" id="disconnect" hidden>Desconectar</button>
   <div id="stats">–</div>
 </div>
 <textarea id="kbd" autocapitalize="off" autocomplete="off" spellcheck="false"></textarea>
@@ -100,8 +101,9 @@ function connect() {
 // Sólo una tablet a la vez (ver src/viewers.rs). La conexión de entrada ocupa
 // el puesto; dentro de la app, el aviso lo muestra el lanzador.
 const app = window.EncajeNative;
-// Qué pide este visor: "auto", "pick" (quedarse con el monitor) o "extra" (otro).
-let seated = false, want = params.get("extra") === "1" ? "extra" : params.get("pick") === "1" ? "pick" : "auto", taken = false;
+// Qué pide este visor: "auto", "ask" (lo eligió la persona), "pick" (quitárselo a
+// quien lo use) o "extra" (otro).
+let seated = false, want = params.get("extra") === "1" ? "extra" : params.get("pick") === "1" ? "pick" : params.get("ask") === "1" ? "ask" : "auto", taken = false;
 
 function clientId() {
   if (app) return app.clientId();
@@ -495,6 +497,8 @@ kbd.addEventListener("input", (e) => {
 });
 
 // ── Menú ─────────────────────────────────────────────────────────────────
+// Sólo en la app (y en una que ya lo sepa hacer): hay un lanzador al que volver.
+$("disconnect").hidden = !(app && app.disconnect);
 $("menu-btn").onclick = () => $("menu").classList.toggle("open");
 $("menu").onclick = (e) => {
   const sc = e.target.dataset && e.target.dataset.scale;
@@ -513,6 +517,7 @@ $("menu").onclick = (e) => {
     else document.documentElement.requestFullscreen({ navigationUI: "hide" }).catch(() => {});
   } else if (act === "keyboard") { kbd.focus(); }
   else if (act === "mode") { mode = mode === "ws" ? "webrtc" : "ws"; connect(); }
+  else if (act === "disconnect") { app.disconnect(); }
   else if (act === "reconnect") connect();
 };
 

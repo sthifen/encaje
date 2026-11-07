@@ -186,8 +186,13 @@ with two options:
   use ports 8790-8792.
 
 If one connects on its own over WiFi and another over USB, the cable wins, since
-it's faster; nothing automatic overrides what you pick by hand. An extra monitor
-goes away 20 seconds after its tablet leaves.
+it's faster; nothing automatic overrides what you pick by hand. Choosing a PC by
+hand never takes the monitor from another tablet either: only **Use on this
+tablet** does. An extra monitor goes away 20 seconds after its tablet leaves.
+
+To switch between USB and WiFi, open the **⋮** menu and tap **Disconnect**. Once
+you disconnect or choose USB, the app stops connecting over WiFi on its own until
+you pick WiFi again.
 
 Each extra monitor makes the desktop GPU draw more. An animated wallpaper is
 drawn on each one, and on integrated graphics it can drop to 15 fps what runs at

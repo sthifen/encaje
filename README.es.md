@@ -176,8 +176,14 @@ opciones:
   los puertos 8790-8792.
 
 Si una entra sola por WiFi y otra por USB, gana el cable, que es más rápido; lo
-que elijas a mano no te lo quita ninguna conexión automática. Un monitor extra
-desaparece solo 20 segundos después de que se vaya su tablet.
+que elijas a mano no te lo quita ninguna conexión automática. Elegir un PC a mano
+tampoco le quita el monitor a otra tablet: eso sólo lo hace **Usar en esta
+tablet**. Un monitor extra desaparece solo 20 segundos después de que se vaya su
+tablet.
+
+Para cambiar entre USB y WiFi, abre el menú **⋮** y toca **Desconectar**. Al
+desconectar o elegir USB, la app deja de entrar sola por WiFi hasta que vuelvas a
+elegir WiFi.
 
 Cada monitor más hace dibujar más a la GPU del escritorio. Un fondo de pantalla
 animado se dibuja en cada uno, y en una gráfica integrada puede dejar a 15 fps

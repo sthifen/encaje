@@ -74,15 +74,23 @@ window.onhashchange = function () { location.reload(); };
 var taken = /^#(busy|replaced|full)\|([^|]*)\|([^|]*)\|(\d+)\|([01])$/.exec(location.hash);
 var auto = location.hash !== "#manual" && !taken;
 if (location.hash === "#error") $("msg").textContent = "Se perdió la conexión con el PC. Reintentando…";
-if (taken) {
-  var by = decodeURIComponent(taken[2]);
-  $("taken-text").textContent = taken[1] === "full" ? "Ya no caben más monitores"
-    : (taken[1] === "busy" ? "En uso en " : "Ahora se usa en ") + by;
+function offer(kind, by, host, port, extend) {
+  $("taken-text").textContent = kind === "full" ? "Ya no caben más monitores"
+    : (kind === "busy" ? "En uso en " : "Ahora se usa en ") + by;
   $("taken").hidden = false;
-  $("take").hidden = taken[1] === "full";
-  $("add").hidden = taken[5] !== "1";
-  $("take").onclick = function () { go(taken[3], parseInt(taken[4], 10), "pick"); };
-  $("add").onclick = function () { go(taken[3], parseInt(taken[4], 10), "extra"); };
+  $("take").hidden = kind === "full";
+  $("add").hidden = !extend;
+  $("take").onclick = function () { go(host, port, "pick"); };
+  $("add").onclick = function () { go(host, port, "extra"); };
+}
+if (taken) offer(taken[1], decodeURIComponent(taken[2]), taken[3], parseInt(taken[4], 10), taken[5] === "1");
+
+// Aquí no se está conectado: si el PC dice que el monitor tiene dueño, es otra
+// tablet, y se ofrece sin tener que intentar conectar primero.
+function liveOffer(pc) {
+  if (taken) return;
+  if (pc && pc.owner) offer("busy", pc.owner, pc.host, pc.port, pc.extend);
+  else $("taken").hidden = true;
 }
 
 function probe(host, port, done) {
@@ -130,7 +138,7 @@ function showPcs(pcs) {
     b.textContent = pc.name;
     small.textContent = pc.host;
     b.appendChild(small);
-    b.onclick = function () { bridge.rememberPc(pc.id); go(pc.host, pc.port, "pick"); };
+    b.onclick = function () { bridge.rememberPc(pc.id); go(pc.host, pc.port, "ask"); };
     box.appendChild(b);
   });
 }
@@ -157,6 +165,7 @@ function pollScan() {
   for (var i = 0; auto && usbMissing && i < s.pcs.length; i++) {
     if (s.pcs[i].id === last) { go(s.pcs[i].host, s.pcs[i].port, "auto"); return; }
   }
+  if (usbMissing) liveOffer(s.pcs.filter(function (pc) { return pc.owner; })[0]);
   $("scan-state").innerHTML = s.pcs.length
     ? '<span class="dot ok"></span>Toca tu PC para conectar.'
     : '<span class="dot"></span>Buscando tu PC…';
@@ -177,6 +186,7 @@ function pollUsb() {
       : '<span class="dot"></span>Buscando PC por USB…';
     $("usb-btn").disabled = !info;
     if (info && auto) { go("localhost", DEFAULT_PORT, "auto"); return; }
+    if (info) liveOffer({ host: "localhost", port: DEFAULT_PORT, owner: info.owner, extend: info.extend });
     setTimeout(pollUsb, 1500);
   });
 }
@@ -186,7 +196,8 @@ $("more").onclick = function () {
   $("manual").hidden = false;
   $("host").focus();
 };
-$("usb-btn").onclick = function () { go("localhost", DEFAULT_PORT, "pick"); };
+// Elegir el cable es no querer que la WiFi vuelva a entrar sola.
+$("usb-btn").onclick = function () { bridge.rememberPc(""); go("localhost", DEFAULT_PORT, "ask"); };
 $("host").value = get("host", "");
 $("wifi-btn").onclick = function () {
   var a = parseAddress($("host").value);
@@ -194,7 +205,7 @@ $("wifi-btn").onclick = function () {
   set("host", $("host").value);
   $("msg").textContent = "Conectando…";
   probe(a.host, a.port, function (info) {
-    if (info) { if (info.id) bridge.rememberPc(info.id); go(a.host, a.port, "pick"); }
+    if (info) { if (info.id) bridge.rememberPc(info.id); go(a.host, a.port, "ask"); }
     else $("msg").textContent = "No se pudo contactar con " + a.host + ":" + a.port + ". ¿Está Encaje abierto en el PC y el cortafuegos permite la conexión?";
   });
 };

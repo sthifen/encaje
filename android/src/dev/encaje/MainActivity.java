@@ -155,6 +155,13 @@ public class MainActivity extends Activity {
             });
         }
 
+        /** Para el visor web: lo mismo que "Desconectar" en el nativo. */
+        @JavascriptInterface
+        public void disconnect() {
+            prefs().edit().remove("last_pc").apply();
+            runOnUiThread(() -> web.loadUrl(LAUNCHER + "#manual"));
+        }
+
         /** Último PC con el que se conectó ("" si ninguno). Por su id: su IP cambia. */
         @JavascriptInterface
         public String lastPc() {
@@ -183,8 +190,8 @@ public class MainActivity extends Activity {
 
         /**
          * Abre el visor nativo; {@code false} si se prefiere el web.
-         * {@code mode}: "auto", "pick" (lo eligió la persona: se queda con el
-         * monitor) o "extra" (otro monitor).
+         * {@code mode}: "auto", "ask" (lo eligió la persona: si está ocupado,
+         * se le pregunta), "pick" (quitárselo a quien lo use) o "extra" (otro monitor).
          */
         @JavascriptInterface
         public boolean open(String host, int port, String mode) {

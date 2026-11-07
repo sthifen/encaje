@@ -3,7 +3,8 @@
 //! rápida, porque el bitrate es el del visor más lento. Así que tiene un solo
 //! dueño, y cambiar de dueño es una decisión de quien usa las tablets:
 //!
-//! * Elegir a mano un PC en la app (`pick`) siempre se queda con el monitor.
+//! * Elegir a mano un PC en la app (`ask`) lo usa si está libre; si no, la app
+//!   pregunta, y sólo responder «usar en esta tablet» (`pick`) lo quita.
 //! * Conectar solo (`auto`) no le quita el monitor a nadie, salvo el cable a
 //!   un WiFi que también entró solo: el USB es más rápido y enchufarlo es
 //!   querer usarlo. Lo elegido a mano no lo desplaza ningún automatismo.
@@ -31,6 +32,27 @@ impl Link {
     }
 }
 
+/// Cómo pide el monitor un visor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Claim {
+    /// Conectó solo.
+    Auto,
+    /// La persona eligió este PC: cuenta como elección, pero no quita a nadie.
+    Ask,
+    /// La persona pidió quedárselo aunque lo use otro.
+    Pick,
+}
+
+impl Claim {
+    pub fn parse(mode: Option<&str>) -> Self {
+        match mode {
+            Some("pick") => Claim::Pick,
+            Some("ask") => Claim::Ask,
+            _ => Claim::Auto,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Owner {
     pub client: String,
@@ -50,8 +72,10 @@ impl Owner {
 }
 
 /// Si `new` se queda con el monitor de `owner`.
-fn takes_over(owner: &Owner, client: &str, link: Link, picked: bool) -> bool {
-    owner.client == client || picked || (link == Link::Usb && owner.link == Link::Wifi && !owner.picked)
+fn takes_over(owner: &Owner, client: &str, link: Link, claim: Claim) -> bool {
+    owner.client == client
+        || claim == Claim::Pick
+        || (claim == Claim::Auto && link == Link::Usb && owner.link == Link::Wifi && !owner.picked)
 }
 
 pub struct Viewers {
@@ -65,16 +89,16 @@ impl Viewers {
     }
 
     /// Pide el monitor. Devuelve la sesión, o el nombre de quien lo usa.
-    pub fn claim(&self, client: &str, name: &str, link: Link, picked: bool) -> Result<u64, String> {
+    pub fn claim(&self, client: &str, name: &str, link: Link, claim: Claim) -> Result<u64, String> {
         let session = self.sessions.fetch_add(1, Ordering::Relaxed) + 1;
         let mut result = Ok(session);
         self.owner.send_if_modified(|owner| match owner {
-            Some(o) if !takes_over(o, client, link, picked) => {
+            Some(o) if !takes_over(o, client, link, claim) => {
                 result = Err(o.name.clone());
                 false
             }
             _ => {
-                let picked = picked || owner.as_ref().is_some_and(|o| o.client == client && o.picked);
+                let picked = claim != Claim::Auto || owner.as_ref().is_some_and(|o| o.client == client && o.picked);
                 *owner = Some(Owner { client: client.into(), name: name.into(), link, picked, session });
                 true
             }
@@ -91,6 +115,11 @@ impl Viewers {
             }
             mine
         });
+    }
+
+    /// Nombre de quien usa el monitor ahora.
+    pub fn owner_name(&self) -> Option<String> {
+        self.owner.borrow().as_ref().map(|o| o.name.clone())
     }
 
     /// Si ese visor puede mandar (`None`: sin identificar).
@@ -124,39 +153,52 @@ mod tests {
     #[test]
     fn automatic_viewers_wait_their_turn() {
         let v = Viewers::new();
-        assert!(v.claim("a", "A", Link::Wifi, false).is_ok());
-        assert_eq!(v.claim("b", "B", Link::Wifi, false), Err("A".into()));
+        assert!(v.claim("a", "A", Link::Wifi, Claim::Auto).is_ok());
+        assert_eq!(v.claim("b", "B", Link::Wifi, Claim::Auto), Err("A".into()));
     }
 
     #[test]
     fn plugging_in_usb_beats_automatic_wifi() {
         let v = Viewers::new();
-        v.claim("slow", "Vieja", Link::Wifi, false).unwrap();
-        assert!(v.claim("fast", "Principal", Link::Usb, false).is_ok());
-        assert_eq!(v.claim("slow", "Vieja", Link::Wifi, false), Err("Principal".into()));
+        v.claim("slow", "Vieja", Link::Wifi, Claim::Auto).unwrap();
+        assert!(v.claim("fast", "Principal", Link::Usb, Claim::Auto).is_ok());
+        assert_eq!(v.claim("slow", "Vieja", Link::Wifi, Claim::Auto), Err("Principal".into()));
     }
 
     #[test]
     fn a_manual_choice_is_not_overridden_automatically() {
         let v = Viewers::new();
-        v.claim("slow", "Vieja", Link::Wifi, true).unwrap();
-        assert_eq!(v.claim("fast", "Principal", Link::Usb, false), Err("Vieja".into()));
-        assert!(v.claim("fast", "Principal", Link::Usb, true).is_ok());
+        v.claim("slow", "Vieja", Link::Wifi, Claim::Pick).unwrap();
+        assert_eq!(v.claim("fast", "Principal", Link::Usb, Claim::Auto), Err("Vieja".into()));
+        assert!(v.claim("fast", "Principal", Link::Usb, Claim::Pick).is_ok());
+    }
+
+    #[test]
+    fn asking_uses_a_free_monitor_but_never_takes_one() {
+        let v = Viewers::new();
+        v.claim("a", "A", Link::Wifi, Claim::Auto).unwrap();
+        assert_eq!(v.claim("b", "B", Link::Usb, Claim::Ask), Err("A".into()));
+        assert!(v.claim("b", "B", Link::Usb, Claim::Pick).is_ok());
+
+        let v = Viewers::new();
+        v.claim("a", "A", Link::Usb, Claim::Ask).unwrap();
+        // Cuenta como elegido a mano: el cable automático no lo desplaza.
+        assert_eq!(v.claim("b", "B", Link::Usb, Claim::Auto), Err("A".into()));
     }
 
     #[test]
     fn reconnecting_keeps_the_manual_choice() {
         let v = Viewers::new();
-        v.claim("a", "A", Link::Wifi, true).unwrap();
-        v.claim("a", "A", Link::Wifi, false).unwrap();
-        assert_eq!(v.claim("b", "B", Link::Usb, false), Err("A".into()));
+        v.claim("a", "A", Link::Wifi, Claim::Pick).unwrap();
+        v.claim("a", "A", Link::Wifi, Claim::Auto).unwrap();
+        assert_eq!(v.claim("b", "B", Link::Usb, Claim::Auto), Err("A".into()));
     }
 
     #[test]
     fn an_old_connection_closing_does_not_free_the_new_one() {
         let v = Viewers::new();
-        let old = v.claim("a", "A", Link::Wifi, false).unwrap();
-        let new = v.claim("a", "A", Link::Wifi, false).unwrap();
+        let old = v.claim("a", "A", Link::Wifi, Claim::Auto).unwrap();
+        let new = v.claim("a", "A", Link::Wifi, Claim::Auto).unwrap();
         v.release(old);
         assert!(!v.may_control(None));
         v.release(new);
@@ -167,7 +209,7 @@ mod tests {
     fn only_the_owner_controls_once_there_is_one() {
         let v = Viewers::new();
         assert!(v.may_control(None));
-        v.claim("a", "A", Link::Usb, false).unwrap();
+        v.claim("a", "A", Link::Usb, Claim::Auto).unwrap();
         assert!(v.may_control(Some("a")));
         assert!(!v.may_control(Some("b")));
         assert!(!v.may_control(None));

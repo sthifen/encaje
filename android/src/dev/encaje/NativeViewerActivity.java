@@ -76,7 +76,7 @@ public class NativeViewerActivity extends Activity implements SurfaceHolder.Call
     /** Resultado: el monitor lo usa otra tablet ({@link #EXTRA_TAKEN}, {@link #EXTRA_BY}). */
     static final int RESULT_TAKEN = RESULT_FIRST_USER + 1;
     static final String EXTRA_TAKEN = "taken", EXTRA_BY = "by", EXTRA_CAN_EXTEND = "can_extend";
-    /** "auto", "pick" (lo eligió la persona: se queda con el monitor) o "extra" (otro monitor). */
+    /** "auto", "ask" (lo eligió la persona), "pick" (quitárselo a quien lo use) o "extra" (otro monitor). */
     static final String EXTRA_MODE = "mode";
     /** Reintentos antes de dar por perdido un monitor extra, que no vuelve si el PC se cierra. */
     private static final int MAX_EXTRA_RETRIES = 5;
@@ -850,6 +850,7 @@ public class NativeViewerActivity extends Activity implements SurfaceHolder.Call
             m.add(1, 10 + i, 1, (scales[i][0].equals(scale) ? "✓ " : "   ") + scales[i][1]);
         }
         m.add(2, 2, 2, "Reconectar");
+        m.add(2, 5, 2, "Desconectar");
         if (Build.VERSION.SDK_INT >= MainActivity.WEB_VIEWER_MIN_SDK) m.add(2, 3, 2, "Usar el visor web");
         m.add(3, 4, 3, lastStats).setEnabled(false);
         pm.setOnMenuItemClickListener(item -> {
@@ -864,6 +865,11 @@ public class NativeViewerActivity extends Activity implements SurfaceHolder.Call
             } else if (id == 2) {
                 WebSocketClient ws = videoWs;
                 if (ws != null) ws.close();
+            } else if (id == 5) {
+                // Vuelve al lanzador para elegir USB o WiFi, y sin que la WiFi
+                // entre sola la próxima vez.
+                prefs.edit().remove("last_pc").apply();
+                finish();
             } else if (id == 3) {
                 setResult(RESULT_WEB, new Intent().putExtra(EXTRA_HOST, host).putExtra(EXTRA_PORT, port));
                 finish();

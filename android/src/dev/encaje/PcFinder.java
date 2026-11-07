@@ -53,7 +53,7 @@ final class PcFinder {
         }, "encaje-buscar").start();
     }
 
-    /** {@code {"scanning":bool,"pcs":[{host,port,name,id,width,height}…]}} */
+    /** {@code {"scanning":bool,"pcs":[{host,port,name,id,owner,extend,width,height}…]}} */
     String state() {
         JSONArray pcs = new JSONArray();
         synchronized (found) {
@@ -134,6 +134,8 @@ final class PcFinder {
                     .put("port", port)
                     .put("name", info.optString("name", host))
                     .put("id", info.optString("id", host))
+                    .put("owner", info.optString("owner", ""))
+                    .put("extend", info.optBoolean("extend"))
                     .put("width", info.optInt("width"))
                     .put("height", info.optInt("height"));
         } catch (IOException | JSONException e) {

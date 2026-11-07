@@ -26,7 +26,7 @@ use crate::capture::Capture;
 use crate::backend::{InputEvent, VirtualDisplay};
 use crate::encoder::{BitrateControl, ClientRate, EncodedFrame, KeyframeRequest};
 use crate::extras::Extras;
-use crate::viewers::{Link, Owner, Viewers};
+use crate::viewers::{Claim, Link, Owner, Viewers};
 
 const INDEX_HTML: &str = include_str!("../web/index.html");
 
@@ -49,7 +49,7 @@ pub struct AppState {
     pub extras: Arc<Extras>,
 }
 
-/// Quién se conecta (`?client=…&name=…&mode=pick`). El navegador y las apps
+/// Quién se conecta (`?client=…&name=…&mode=ask`). El navegador y las apps
 /// antiguas no lo dicen: ver `viewers.rs`.
 #[derive(serde::Deserialize)]
 struct ViewerQuery {
@@ -77,7 +77,7 @@ impl ViewerQuery {
         // Por `adb reverse` el visor llega desde este mismo equipo.
         let link = if peer.ip().is_loopback() { Link::Usb } else { Link::Wifi };
         let name = self.name.clone().unwrap_or_else(|| peer.ip().to_string());
-        match s.viewers.claim(&client, &name, link, self.mode.as_deref() == Some("pick")) {
+        match s.viewers.claim(&client, &name, link, Claim::parse(self.mode.as_deref())) {
             Ok(session) => Ok(Some(Seat { client, session })),
             Err(by) => {
                 tracing::info!("{name} espera: el monitor lo usa {by}");
@@ -146,7 +146,7 @@ async fn info(State(s): State<Arc<AppState>>) -> impl IntoResponse {
     // CORS abierto: el lanzador de la app Android consulta desde file://.
     (
         [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")],
-        Json(json!({ "width": s.capture.geometry.get().0, "height": s.capture.geometry.get().1, "fps": s.capture.fps.load(std::sync::atomic::Ordering::Relaxed), "auto_size": s.auto_size, "name": crate::lan::hostname(), "id": crate::lan::server_id() })),
+        Json(json!({ "width": s.capture.geometry.get().0, "height": s.capture.geometry.get().1, "fps": s.capture.fps.load(std::sync::atomic::Ordering::Relaxed), "auto_size": s.auto_size, "name": crate::lan::hostname(), "id": crate::lan::server_id(), "owner": s.viewers.owner_name().unwrap_or_default(), "extend": s.extras.supported() })),
     )
 }
 
