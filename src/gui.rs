@@ -112,7 +112,15 @@ struct State {
     install: String,
     /// Quién usa el monitor ahora.
     viewer: Option<String>,
+    /// Se está enseñando el QR para conectar por WiFi.
+    show_qr: bool,
 }
+
+/// Tamaño fijo de la ventana. Lo de dentro nunca la estira: si algo no cabe
+/// (una guía con textos largos), se desplaza dentro de su página. Antes la
+/// guía era más alta que la ventana y se salía por abajo.
+const WIN_W: i32 = 780;
+const WIN_H: i32 = 480;
 
 /// El puerto por defecto, el único que la app busca sola.
 const DEFAULT_PORT: u16 = 8787;
@@ -120,7 +128,36 @@ const DEFAULT_PORT: u16 = 8787;
 const WIFI_REFRESH: Duration = Duration::from_secs(2);
 
 const CSS: &str = r#"
-.wifi-hint { font-size: 12px; opacity: 0.8; margin-top: 8px; }
+window.encaje, window.encaje label { font-family: "Inter", "Cantarell", "Noto Sans", sans-serif; }
+.topbar { min-height: 34px; }
+.brand { font-size: 15px; font-weight: 700; letter-spacing: 0.3px; color: #F4F5F8; }
+.pill {
+  padding: 4px 12px 4px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; color: #E6E8EE;
+  background-color: rgba(0,0,0,0.22); border: 1px solid rgba(255,255,255,0.14);
+}
+.pdot { min-width: 8px; min-height: 8px; border-radius: 999px; background-color: #8B93A7; }
+.pill.ok .pdot { background-color: #3FD07A; box-shadow: 0 0 8px rgba(63,208,122,0.9); }
+.pill.wait .pdot { background-color: #FFB454; animation: pulse 1.4s ease-in-out infinite; }
+@keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.25; } 100% { opacity: 1; } }
+.card-title { font-size: 18px; font-weight: 700; color: #F4F5F8; margin-left: 6px; }
+.card-sub { font-size: 12.5px; color: rgba(230,232,238,0.72); margin-left: 6px; }
+.chip {
+  padding: 4px 12px; border-radius: 999px; font-size: 12px; font-weight: 600; margin-left: 6px;
+  background-color: rgba(255,255,255,0.10); color: rgba(244,245,248,0.85);
+}
+button.card.blue .chip.ok, button.card.blue .chip.wait { background-color: rgba(0,195,227,0.22); color: #9DEBF7; }
+button.card.red .chip.ok, button.card.red .chip.wait { background-color: rgba(255,69,84,0.22); color: #FFB3BA; }
+.chip.ok { box-shadow: inset 0 0 0 1px rgba(255,255,255,0.18); }
+.footer { padding-top: 10px; border-top: 1px solid rgba(255,255,255,0.10); }
+.foot-hint { font-size: 12px; color: rgba(230,232,238,0.62); }
+button.chipbtn {
+  min-height: 26px; padding: 0 12px; border-radius: 999px; background-image: none; box-shadow: none;
+  background-color: rgba(0,0,0,0.22); border: 1px solid rgba(255,255,255,0.14);
+  font-family: monospace; font-size: 12px; color: #9DEBF7;
+}
+button.chipbtn:hover { background-color: rgba(0,195,227,0.18); border-color: rgba(0,195,227,0.6); }
+scrolledwindow, scrolledwindow > viewport { background: none; }
+scrolledwindow undershoot, scrolledwindow overshoot { background: none; box-shadow: none; border: none; }
 window.encaje { background: transparent; }
 window.encaje.csd {
   border-radius: 28px;
@@ -141,7 +178,7 @@ button.card {
   background-image: linear-gradient(170deg, rgba(255,255,255,0.14), rgba(255,255,255,0.02));
   border: 1px solid rgba(255,255,255,0.14);
   border-radius: 24px;
-  padding: 14px;
+  padding: 14px 14px 16px;
   box-shadow: inset 0 1px 0 rgba(255,255,255,0.20), 0 10px 26px rgba(0,0,0,0.28);
   transition: all 220ms cubic-bezier(0.2, 0.9, 0.3, 1.2);
 }
@@ -170,11 +207,14 @@ button.light.zoom { background-color: rgba(255,255,255,0.18); }
 button.light.zoom.alert { background-color: #ff9f0a; box-shadow: 0 0 10px rgba(255,159,10,0.8); }
 button.light:hover { filter: brightness(1.15); }
 button.help {
-  min-width: 22px; min-height: 22px; padding: 0; margin-left: 4px;
+  min-width: 28px; min-height: 28px; padding: 0; margin-left: 4px;
   border-radius: 999px; border: 1px solid rgba(255,255,255,0.22);
   background: rgba(255,255,255,0.08); background-image: none;
   color: rgba(255,255,255,0.85); font-size: 12px; font-weight: 600;
 }
+button.help.qr { min-width: 36px; font-size: 10px; letter-spacing: 1px; }
+button.help.on { background: #00C3E3; color: #0B2A33; border-color: #00C3E3; }
+.qr-address { font-family: monospace; font-size: 26px; font-weight: 600; color: #00C3E3; }
 .guide { color: #F4F5F8; }
 .guide-label { font-size: 12px; color: #AEB3C2; }
 .guide-num { font-size: 56px; font-weight: 600; color: #00C3E3; }
@@ -235,6 +275,7 @@ fn build(app: &gtk::Application) {
         running: None,
         status: Status::Off,
         viewer: None,
+        show_qr: false,
         restart_at: None,
         failures: 0,
         next_id: 0,
@@ -250,8 +291,8 @@ fn build(app: &gtk::Application) {
 
     let window = gtk::ApplicationWindow::builder()
         .application(app)
-        .default_width(600)
-        .default_height(320)
+        .default_width(WIN_W)
+        .default_height(WIN_H)
         .resizable(false)
         .icon_name("encaje")
         .title("Encaje")
@@ -264,6 +305,7 @@ fn build(app: &gtk::Application) {
     let glass = gtk::Overlay::new();
     glass.add_css_class("glass");
     glass.set_overflow(gtk::Overflow::Hidden);
+    glass.set_size_request(WIN_W, WIN_H);
 
     // Fondo: manchas de color que se mueven despacio.
     let aurora = gtk::DrawingArea::new();
@@ -281,11 +323,11 @@ fn build(app: &gtk::Application) {
     frost.set_can_target(false);
     glass.add_overlay(&frost);
 
-    let content = gtk::Box::new(gtk::Orientation::Vertical, 10);
-    content.set_margin_top(14);
-    content.set_margin_start(16);
-    content.set_margin_end(26);
-    content.set_margin_bottom(26);
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 14);
+    content.set_margin_top(16);
+    content.set_margin_start(22);
+    content.set_margin_end(22);
+    content.set_margin_bottom(16);
     glass.add_overlay(&content);
 
     let lights = gtk::Box::new(gtk::Orientation::Horizontal, 8);
@@ -309,6 +351,33 @@ fn build(app: &gtk::Application) {
         }
         lights.append(&b);
     }
+    let topbar = gtk::CenterBox::new();
+    topbar.add_css_class("topbar");
+    topbar.set_start_widget(Some(&lights));
+    let brand = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let mark = gtk::DrawingArea::new();
+    mark.set_content_width(18);
+    mark.set_content_height(18);
+    mark.set_valign(gtk::Align::Center);
+    mark.set_draw_func(|_, cr, w, h| draw_mark(cr, w as f64, h as f64));
+    brand.append(&mark);
+    let name = gtk::Label::new(Some("Encaje"));
+    name.add_css_class("brand");
+    brand.append(&name);
+    topbar.set_center_widget(Some(&brand));
+    let tools = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let pill = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    pill.add_css_class("pill");
+    pill.set_valign(gtk::Align::Center);
+    let pill_dot = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    pill_dot.add_css_class("pdot");
+    pill_dot.set_valign(gtk::Align::Center);
+    pill.append(&pill_dot);
+    let pill_text = gtk::Label::new(None);
+    pill.append(&pill_text);
+    tools.append(&pill);
+    topbar.set_end_widget(Some(&tools));
+
     let help = gtk::Button::with_label("?");
     help.add_css_class("help");
     help.set_valign(gtk::Align::Center);
@@ -317,18 +386,38 @@ fn build(app: &gtk::Application) {
         let state = state.clone();
         help.connect_clicked(move |_| open_guide(&mut state.borrow_mut(), false));
     }
-    lights.append(&help);
-    content.append(&lights);
+    let qr_button = gtk::Button::with_label("QR");
+    qr_button.add_css_class("help");
+    qr_button.add_css_class("qr");
+    qr_button.set_valign(gtk::Align::Center);
+    qr_button.set_tooltip_text(Some("Conectar por WiFi con un QR"));
+    {
+        let state = state.clone();
+        qr_button.connect_clicked(move |_| {
+            let mut s = state.borrow_mut();
+            s.show_qr = !s.show_qr;
+            if s.show_qr {
+                close_guide(&mut s);
+            }
+        });
+    }
+    tools.append(&qr_button);
+    tools.append(&help);
+    content.append(&topbar);
 
-    let cards = gtk::Box::new(gtk::Orientation::Horizontal, 22);
+    let cards = gtk::Box::new(gtk::Orientation::Horizontal, 18);
     cards.set_homogeneous(true);
     cards.set_vexpand(true);
-    cards.set_margin_start(10);
+    // Hueco para la sombra de las tarjetas, que si no se corta en el borde.
+    cards.set_margin_bottom(16);
+    cards.set_margin_start(4);
+    cards.set_margin_end(4);
     let mut buttons = Vec::new();
     for mode in [Mode::Monitor, Mode::Input] {
         let icon = gtk::DrawingArea::new();
         icon.set_content_width(230);
-        icon.set_content_height(170);
+        icon.set_content_height(150);
+        icon.set_vexpand(true);
         {
             let state = state.clone();
             icon.set_draw_func(move |_, cr, w, h| {
@@ -337,7 +426,29 @@ fn build(app: &gtk::Application) {
                 draw_icon(cr, mode, w as f64, h as f64, start.elapsed().as_secs_f64(), status);
             });
         }
-        let button = gtk::Button::builder().child(&icon).build();
+        let body = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        body.append(&icon);
+        let (title, sub) = match mode {
+            Mode::Monitor => ("Segundo monitor", "La tablet amplía tu escritorio. Arrastra ventanas."),
+            Mode::Input => ("Ratón y teclado", "Su Android, con el ratón y el teclado del PC."),
+        };
+        let title = gtk::Label::new(Some(title));
+        title.add_css_class("card-title");
+        title.set_xalign(0.0);
+        body.append(&title);
+        let sub = gtk::Label::new(Some(sub));
+        sub.add_css_class("card-sub");
+        sub.set_xalign(0.0);
+        sub.set_wrap(true);
+        sub.set_max_width_chars(30);
+        sub.set_lines(2);
+        body.append(&sub);
+        let chip = gtk::Label::new(None);
+        chip.add_css_class("chip");
+        chip.set_halign(gtk::Align::Start);
+        chip.set_margin_top(8);
+        body.append(&chip);
+        let button = gtk::Button::builder().child(&body).build();
         button.add_css_class("card");
         button.add_css_class(match mode {
             Mode::Monitor => "blue",
@@ -360,7 +471,7 @@ fn build(app: &gtk::Application) {
             });
         }
         cards.append(&button);
-        buttons.push((mode, button, icon));
+        buttons.push((mode, button, icon, chip));
     }
     let guide_ui = GuideUi::build(&state);
     let pages = gtk::Stack::new();
@@ -368,15 +479,45 @@ fn build(app: &gtk::Application) {
     pages.set_transition_type(gtk::StackTransitionType::Crossfade);
     pages.add_named(&cards, Some("cards"));
     pages.add_named(&guide_ui.root, Some("guide"));
-    content.append(&pages);
+    let qr_ui = QrUi::build(&state);
+    pages.add_named(&qr_ui.root, Some("qr"));
+    // Las páginas no pueden estirar la ventana: lo que no quepa se desplaza.
+    let scroller = gtk::ScrolledWindow::new();
+    scroller.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    scroller.set_propagate_natural_height(false);
+    scroller.set_vexpand(true);
+    scroller.set_child(Some(&pages));
+    content.append(&scroller);
 
-    // Cómo llegar desde la tablet por WiFi. Se puede seleccionar y copiar.
-    let wifi = gtk::Label::new(None);
-    wifi.set_selectable(true);
-    wifi.set_wrap(true);
-    wifi.set_justify(gtk::Justification::Center);
-    wifi.add_css_class("wifi-hint");
-    content.append(&wifi);
+    // Pie: la dirección WiFi (abre el QR), quién usa el monitor y la versión.
+    let footer = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+    footer.add_css_class("footer");
+    let wifi = gtk::Button::new();
+    wifi.add_css_class("chipbtn");
+    wifi.set_tooltip_text(Some("Enseñar el QR para conectar por WiFi"));
+    let wifi_label = gtk::Label::new(None);
+    wifi.set_child(Some(&wifi_label));
+    {
+        let state = state.clone();
+        wifi.connect_clicked(move |_| {
+            let mut s = state.borrow_mut();
+            s.show_qr = !s.show_qr;
+            if s.show_qr {
+                close_guide(&mut s);
+            }
+        });
+    }
+    footer.append(&wifi);
+    let hint = gtk::Label::new(None);
+    hint.add_css_class("foot-hint");
+    hint.set_hexpand(true);
+    hint.set_xalign(0.0);
+    hint.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    footer.append(&hint);
+    let version = gtk::Label::new(Some(concat!("v", env!("CARGO_PKG_VERSION"))));
+    version.add_css_class("foot-hint");
+    footer.append(&version);
+    content.append(&footer);
 
     let handle = gtk::WindowHandle::new();
     handle.set_child(Some(&glass));
@@ -415,7 +556,13 @@ fn build(app: &gtk::Application) {
                     guide_ui.render(&guide::step(g.manual, g.adb, &s.install));
                     pages.set_visible_child_name("guide");
                 }
+                None if s.show_qr => pages.set_visible_child_name("qr"),
                 None => pages.set_visible_child_name("cards"),
+            }
+            if s.show_qr {
+                qr_button.add_css_class("on");
+            } else {
+                qr_button.remove_css_class("on");
             }
             supervise(&mut s);
             if s.quitting && s.running.is_none() {
@@ -429,21 +576,48 @@ fn build(app: &gtk::Application) {
                     b.remove_css_class("alert");
                 }
             }
-            for (mode, button, icon) in &buttons {
-                if s.wanted == Some(*mode) {
-                    button.add_css_class("active");
+            for (mode, button, icon, chip) in &buttons {
+                let (text, class) = if s.wanted == Some(*mode) {
+                    match s.status {
+                        Status::Connected => (
+                            s.viewer.as_deref().map_or("Conectado".to_owned(), |v| format!("Conectado · {v}")),
+                            "ok",
+                        ),
+                        _ => ("Esperando a la tablet…".to_owned(), "wait"),
+                    }
                 } else {
-                    button.remove_css_class("active");
+                    ("Usar este modo".to_owned(), "off")
+                };
+                set_state_class(button, if s.wanted == Some(*mode) { "active" } else { "" }, &["active"]);
+                set_state_class(chip, class, &["ok", "wait", "off"]);
+                if chip.text() != text {
+                    chip.set_text(&text);
                 }
                 icon.queue_draw();
             }
+            let (text, class) = match (s.wanted, s.status) {
+                (None, _) => ("Sin compartir", "off"),
+                (Some(_), Status::Connected) => ("Conectado", "ok"),
+                (Some(_), _) => ("Esperando a la tablet", "wait"),
+            };
+            set_state_class(&pill, class, &["ok", "wait", "off"]);
+            if pill_text.text() != text {
+                pill_text.set_text(text);
+            }
             if wifi_checked.elapsed() >= WIFI_REFRESH {
                 wifi_checked = Instant::now();
-                let text = (s.wanted == Some(Mode::Monitor) && s.guide.is_none())
-                    .then(|| connect_hint(s.viewer.as_deref()))
-                    .flatten();
-                wifi.set_visible(text.is_some());
-                wifi.set_text(text.as_deref().unwrap_or_default());
+                qr_ui.refresh();
+                let port = config_port();
+                wifi_label.set_text(&match crate::lan::addresses_best_first().first() {
+                    Some(ip) => format!("WiFi  {ip}:{port}"),
+                    None => "Sin red".to_owned(),
+                });
+                hint.set_text(&match (&s.viewer, s.wanted) {
+                    (Some(v), _) => format!("En uso en {v}. Para cambiar, toca este PC en la otra tablet."),
+                    (None, Some(Mode::Monitor)) => "Abre Encaje en la tablet: por cable entra sola; por WiFi, toca este PC o escanea el QR.".to_owned(),
+                    (None, Some(Mode::Input)) => "Conecta la tablet por cable con la depuración USB activada.".to_owned(),
+                    (None, None) => "Elige un modo para empezar.".to_owned(),
+                });
             }
             aurora.queue_draw();
             glib::ControlFlow::Continue
@@ -463,6 +637,151 @@ fn build(app: &gtk::Application) {
         }
     }
     window.present();
+}
+
+/// Deja en `w` sólo la clase `on` de entre `all` (ninguna si `on` está vacía).
+fn set_state_class(w: &impl IsA<gtk::Widget>, on: &str, all: &[&str]) {
+    for c in all {
+        if *c == on {
+            w.add_css_class(c);
+        } else {
+            w.remove_css_class(c);
+        }
+    }
+}
+
+/// La marca junto al nombre: monitor y tablet encajados, en los dos colores.
+fn draw_mark(cr: &cairo::Context, w: f64, h: f64) {
+    let s = w.min(h) / 18.0;
+    cr.scale(s, s);
+    rounded(cr, 1.0, 3.0, 11.0, 8.0, 2.0);
+    cr.set_source_rgb(0.0, 0.765, 0.89);
+    let _ = cr.fill();
+    rounded(cr, 9.0, 7.0, 8.0, 9.0, 2.0);
+    cr.set_source_rgb(1.0, 0.27, 0.33);
+    let _ = cr.fill();
+}
+
+// ---- QR para conectar por WiFi ----
+
+/// El QR y la dirección en grande: la tablet lo escanea desde la app (o con
+/// la cámara de un celular, que abre el visor web) y no hay que escribir nada.
+struct QrUi {
+    root: gtk::Box,
+    code: gtk::DrawingArea,
+    name: gtk::Label,
+    address: gtk::Label,
+    others: gtk::Label,
+    link: Rc<RefCell<Option<qrcode::QrCode>>>,
+    shown: RefCell<Option<String>>,
+}
+
+impl QrUi {
+    fn build(state: &Rc<RefCell<State>>) -> Self {
+        let root = gtk::Box::new(gtk::Orientation::Horizontal, 28);
+        root.add_css_class("guide");
+        root.set_margin_start(10);
+        root.set_margin_top(4);
+        root.set_valign(gtk::Align::Center);
+
+        let link: Rc<RefCell<Option<qrcode::QrCode>>> = Rc::new(RefCell::new(None));
+        let code = gtk::DrawingArea::new();
+        code.set_content_width(250);
+        code.set_content_height(250);
+        code.set_valign(gtk::Align::Center);
+        {
+            let link = link.clone();
+            code.set_draw_func(move |_, cr, w, h| draw_qr(cr, w as f64, h as f64, link.borrow().as_ref()));
+        }
+        root.append(&code);
+
+        let text = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        text.set_valign(gtk::Align::Center);
+        text.set_hexpand(true);
+        let new_label = |class: &str| {
+            let l = gtk::Label::new(None);
+            l.add_css_class(class);
+            l.set_xalign(0.0);
+            l.set_wrap(true);
+            l.set_max_width_chars(34);
+            text.append(&l);
+            l
+        };
+        let title = new_label("guide-label");
+        title.set_text("CONECTAR POR WIFI");
+        let name = new_label("guide-title");
+        let address = new_label("qr-address");
+        address.set_selectable(true);
+        let others = new_label("guide-hint");
+        others.set_selectable(true);
+        let body = new_label("guide-body");
+        body.set_text("En la tablet, abre Encaje y toca «Escanear QR». Con la cámara de un celular se abre en el navegador.");
+
+        let done = gtk::Button::with_label("Listo");
+        done.add_css_class("ghost");
+        done.set_halign(gtk::Align::Start);
+        done.set_margin_top(2);
+        {
+            let state = state.clone();
+            done.connect_clicked(move |_| state.borrow_mut().show_qr = false);
+        }
+        text.append(&done);
+        root.append(&text);
+
+        let ui = Self { root, code, name, address, others, link, shown: RefCell::new(None) };
+        ui.refresh();
+        ui
+    }
+
+    /// Rehace el QR si cambió la red (otra WiFi, se enchufó el cable…).
+    fn refresh(&self) {
+        let port = config_port();
+        let link = crate::lan::qr_link(port);
+        if *self.shown.borrow() == link {
+            return;
+        }
+        let ips = crate::lan::addresses_best_first();
+        match ips.first() {
+            Some(ip) => {
+                self.name.set_text(&crate::lan::hostname());
+                self.address.set_text(&format!("{ip}:{port}"));
+            }
+            None => {
+                self.name.set_text("Sin red");
+                self.address.set_text("Conecta el PC a una WiFi o a un cable de red.");
+            }
+        }
+        let rest: Vec<String> = ips.iter().skip(1).map(|ip| format!("{ip}:{port}")).collect();
+        self.others.set_visible(!rest.is_empty());
+        self.others.set_text(&format!("También: {}", rest.join(" · ")));
+        *self.link.borrow_mut() =
+            link.as_ref().and_then(|l| qrcode::QrCode::with_error_correction_level(l.as_bytes(), qrcode::EcLevel::M).ok());
+        *self.shown.borrow_mut() = link;
+        self.code.queue_draw();
+    }
+}
+
+/// Fondo blanco redondeado con margen (la zona tranquila que piden los
+/// lectores) y los módulos en negro, alineados a píxeles enteros.
+fn draw_qr(cr: &cairo::Context, w: f64, h: f64, code: Option<&qrcode::QrCode>) {
+    let side = w.min(h);
+    let (x0, y0) = ((w - side) / 2.0, (h - side) / 2.0);
+    rounded(cr, x0, y0, side, side, 18.0);
+    cr.set_source_rgba(1.0, 1.0, 1.0, if code.is_some() { 1.0 } else { 0.12 });
+    let _ = cr.fill();
+    let Some(code) = code else { return };
+    let n = code.width();
+    let module = ((side - 24.0) / (n as f64 + 2.0)).floor().max(1.0);
+    let used = module * n as f64;
+    let (ox, oy) = ((x0 + (side - used) / 2.0).round(), (y0 + (side - used) / 2.0).round());
+    cr.set_source_rgb(0.05, 0.06, 0.09);
+    for (i, c) in code.to_colors().iter().enumerate() {
+        if *c == qrcode::Color::Dark {
+            let (mx, my) = ((i % n) as f64, (i / n) as f64);
+            cr.rectangle(ox + mx * module, oy + my * module, module, module);
+        }
+    }
+    let _ = cr.fill();
 }
 
 // ---- Guía de la primera vez ----
@@ -509,7 +828,7 @@ impl GuideUi {
         middle.set_vexpand(true);
         let card = gtk::Box::new(gtk::Orientation::Vertical, 0);
         card.add_css_class("guide-card");
-        card.set_size_request(118, 150);
+        card.set_size_request(150, 190);
         card.set_valign(gtk::Align::Center);
         let num = gtk::Label::new(None);
         num.add_css_class("guide-num");
@@ -525,7 +844,7 @@ impl GuideUi {
             l.add_css_class(class);
             l.set_xalign(0.0);
             l.set_wrap(true);
-            l.set_max_width_chars(40);
+            l.set_max_width_chars(48);
             text.append(&l);
             l
         };
@@ -842,28 +1161,6 @@ fn send_report() {
 }
 
 // ---- Configuración ----
-
-/// Quién usa el monitor y cómo cambiarlo, o cómo conectar si no hay nadie.
-fn connect_hint(viewer: Option<&str>) -> Option<String> {
-    match viewer {
-        Some(v) => Some(format!("En uso en {v}.\nPara cambiar, abre la app en la otra tablet y toca este PC.")),
-        None => wifi_hint(),
-    }
-}
-
-/// Qué hacer en la tablet para conectar por WiFi; nada si no hay red.
-fn wifi_hint() -> Option<String> {
-    let port = config_port();
-    let urls: Vec<String> = crate::lan::addresses().iter().map(|ip| format!("http://{ip}:{port}")).collect();
-    let first = urls.first()?;
-    Some(match port {
-        DEFAULT_PORT => format!(
-            "Por WiFi: en la app de la tablet, toca «{}».\nEn un navegador: {first}",
-            crate::lan::hostname()
-        ),
-        _ => format!("Por WiFi, escribe en la tablet: {first}"),
-    })
-}
 
 /// Puerto del servidor, si encaje.conf lo cambia.
 fn config_port() -> u16 {

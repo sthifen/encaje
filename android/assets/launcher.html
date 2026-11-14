@@ -5,66 +5,177 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Encaje</title>
 <!-- Lo abre también el WebView de Android 4.4 (Chromium 30): sólo ES5, nada de
-     grid, variables CSS ni fetch. -->
+     grid, variables CSS ni fetch. Flexbox sin prefijo sí (Chromium 29+). -->
 <style>
-  * { box-sizing: border-box; }
-  body { margin: 0; min-height: 100vh; background: #0d1117; color: #e6edf3; padding: 16px;
-    font: 15px/1.45 Roboto, sans-serif; display: flex; align-items: center; justify-content: center; }
-  main { width: 100%; max-width: 560px; }
-  h1 { margin: 0 0 14px; font-size: 20px; font-weight: 600; }
-  h1 small { display: block; color: #8b949e; font-weight: 400; font-size: 13px; }
-  section { background: #161b22; border: 1px solid #30363d; border-radius: 14px; padding: 16px; margin-bottom: 14px; }
-  h2 { margin: 0 0 10px; font-size: 15px; }
-  p { margin: 0 0 10px; color: #8b949e; font-size: 13px; }
-  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #8b949e; margin-right: 6px; }
-  .dot.ok { background: #3fb950; }
-  input, button { font: inherit; border-radius: 10px; border: 1px solid #30363d; padding: 10px 12px; }
-  input[type=text] { background: #0d1117; color: #e6edf3; width: 100%; min-width: 0; }
-  button { background: #4f8cff; color: #fff; border: 0; font-weight: 600; }
-  button:disabled { opacity: .45; }
-  button.quiet { background: none; color: #4f8cff; padding: 4px 0; font-weight: 400; }
-  .row { display: flex; }
-  .row input { flex: 1; margin-right: 8px; }
-  .pc { display: block; width: 100%; text-align: left; margin-bottom: 8px; }
-  .pc small { display: block; font-weight: 400; opacity: .8; }
-  #native-row { display: flex; align-items: center; color: #9a9a9a; font-size: 13px; }
-  #native-row input { margin: 0 8px 0 0; }
-  #msg { color: #f0883e; font-size: 13px; min-height: 1em; margin-bottom: 8px; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { height: 100%; }
+  body { margin: 0; background: #12131B; color: #F4F5F8; font: 18px/1.4 Roboto, "Noto Sans", sans-serif;
+    -webkit-user-select: none; user-select: none; }
+  button, input { font: inherit; color: inherit; }
+  button { border: 0; background: none; padding: 0; cursor: pointer; }
   [hidden] { display: none !important; }
+
+  .app { display: flex; height: 100%; }
+
+  /* ---- izquierda: el PC elegido, con el dibujo y sus acciones ---- */
+  aside { position: relative; overflow: hidden; width: 42%; min-width: 360px; background: #0C0D14;
+    padding: 36px 40px 32px; display: flex; flex-direction: column; }
+  .aurora { position: absolute; border-radius: 50%; pointer-events: none; }
+  .a1 { width: 620px; height: 620px; left: -260px; top: -240px;
+    background: radial-gradient(circle, rgba(0,195,227,0.55) 0%, rgba(0,195,227,0) 68%); }
+  .a2 { width: 560px; height: 560px; right: -260px; bottom: -260px;
+    background: radial-gradient(circle, rgba(255,69,84,0.42) 0%, rgba(255,69,84,0) 68%); }
+  .a3 { width: 420px; height: 420px; left: 30%; top: 40%;
+    background: radial-gradient(circle, rgba(120,90,255,0.22) 0%, rgba(120,90,255,0) 70%); }
+  aside > * { position: relative; }
+  .brand { display: flex; align-items: center; }
+  .brand b { font-size: 30px; font-weight: 700; letter-spacing: -0.5px; -webkit-box-flex: 1; flex: 1; }
+  .round { width: 52px; height: 52px; border-radius: 26px; border: 1px solid rgba(255,255,255,0.22);
+    background: rgba(255,255,255,0.08); font-weight: 600; font-size: 21px; }
+  .art { margin: 18px 0 6px; max-width: 320px; width: 70%; height: auto; display: block; }
+  .art .tab { -webkit-transition: stroke .3s; transition: stroke .3s; }
+  .art.search .glow { -webkit-animation: pulse 1.8s ease-in-out infinite; animation: pulse 1.8s ease-in-out infinite; }
+  @-webkit-keyframes pulse { 0%,100% { opacity: .15 } 50% { opacity: .5 } }
+  @keyframes pulse { 0%,100% { opacity: .15 } 50% { opacity: .5 } }
+  .grow { -webkit-box-flex: 1; flex: 1; min-height: 8px; }
+  .kicker { font-size: 15px; letter-spacing: 2px; font-weight: 600; color: #7FE3F2; text-transform: uppercase; }
+  .kicker.warn { color: #FFB454; }
+  h1 { margin: 6px 0 4px; font-size: 46px; line-height: 1.08; font-weight: 700; letter-spacing: -1px;
+    overflow: hidden; text-overflow: ellipsis; }
+  .lead { margin: 0; font-size: 19px; color: #D3D6DE; }
+  .actions { margin-top: 22px; display: flex; flex-direction: column; }
+  .actions button { min-height: 72px; border-radius: 24px; font-size: 21px; font-weight: 600; margin-bottom: 12px;
+    display: flex; align-items: center; justify-content: center; padding: 0 22px; }
+  .actions svg { margin-right: 12px; flex-shrink: 0; }
+  .primary { background: #00C3E3; color: #0B2A33 !important; box-shadow: 0 0 36px rgba(0,195,227,0.40); min-height: 84px !important; font-size: 23px !important; }
+  .primary:active { background: #3DD3EC; }
+  .glass { background: rgba(255,255,255,0.10); border: 1px solid rgba(255,255,255,0.26) !important; }
+  .glass:active { background: rgba(255,255,255,0.18); }
+  .ghost { border: 1px solid rgba(255,255,255,0.18) !important; color: #D3D6DE !important; }
+  .pair { display: flex; }
+  .pair button { -webkit-box-flex: 1; flex: 1; font-size: 18px !important; padding: 0 12px !important; white-space: nowrap; }
+  .pair svg { margin-right: 8px !important; }
+  .pair button + button { margin-left: 12px; }
+  .switch { display: flex; align-items: center; margin-top: 10px; font-size: 16px; color: #AEB3C2; }
+  .switch input { display: none; }
+  .track { width: 52px; height: 30px; border-radius: 15px; background: rgba(255,255,255,0.20); position: relative;
+    margin-right: 12px; flex-shrink: 0; -webkit-transition: background .2s; transition: background .2s; }
+  .track:after { content: ""; position: absolute; left: 3px; top: 3px; width: 24px; height: 24px; border-radius: 12px;
+    background: #fff; -webkit-transition: left .2s; transition: left .2s; }
+  .switch input:checked + .track { background: #00C3E3; }
+  .switch input:checked + .track:after { left: 25px; }
+
+  /* ---- derecha: la lista, el QR y la dirección ---- */
+  main { -webkit-box-flex: 1; flex: 1; min-width: 0; padding: 40px 44px 32px; display: flex; flex-direction: column; overflow-y: auto; }
+  .label { font-size: 15px; letter-spacing: 2px; color: #AEB3C2; font-weight: 600; margin: 0 0 12px; }
+  .label + .row, .row + .row { margin-top: 0; }
+  .list { margin-bottom: 22px; }
+  .row { display: flex; align-items: center; width: 100%; min-height: 92px; padding: 14px 24px; margin-bottom: 12px;
+    border-radius: 26px; border: 1px solid rgba(255,255,255,0.16); background: rgba(255,255,255,0.07); text-align: left; }
+  .row:active { background: rgba(255,255,255,0.13); }
+  .row.on { border-color: rgba(0,195,227,0.9); background: rgba(0,195,227,0.10); box-shadow: 0 0 30px rgba(0,195,227,0.25); }
+  .row .dot { width: 16px; height: 16px; border-radius: 8px; background: #8B93A7; margin-right: 20px; flex-shrink: 0; }
+  .dot.ok { background: #3FD07A; } .dot.busy { background: #FF9F0A; }
+  .row .txt { -webkit-box-flex: 1; flex: 1; min-width: 0; font-size: 22px; font-weight: 600; }
+  .row small { display: block; font-size: 16px; font-weight: 400; color: #AEB3C2; margin-top: 2px; }
+  .row .chev { color: #7FE3F2; font-size: 30px; margin-left: 12px; }
+  .empty { display: flex; align-items: center; min-height: 72px; padding: 0 24px; margin-bottom: 12px; border-radius: 26px;
+    border: 1px dashed rgba(255,255,255,0.16); color: #AEB3C2; font-size: 17px; }
+  .empty .dot { width: 12px; height: 12px; border-radius: 6px; background: #8B93A7; margin-right: 16px;
+    -webkit-animation: pulse 1.6s infinite; animation: pulse 1.6s infinite; }
+  .tools { display: flex; margin-top: 6px; }
+  .tools > * { -webkit-box-flex: 1; flex: 1; }
+  .tools > * + * { margin-left: 14px; }
+  .scan { min-height: 84px; border-radius: 26px; font-size: 21px; font-weight: 600; display: flex; align-items: center; justify-content: center; }
+  .scan { white-space: nowrap; padding: 0 16px; }
+  .scan svg { margin-right: 12px; flex-shrink: 0; }
+  .addr { min-height: 84px; border-radius: 26px; border: 1px solid rgba(255,255,255,0.18); background: rgba(0,0,0,0.28);
+    display: flex; align-items: center; padding: 0 10px 0 22px; }
+  .addr input { -webkit-box-flex: 1; flex: 1; min-width: 0; background: none; border: 0; outline: none; font-size: 21px;
+    font-family: "Roboto Mono", monospace; -webkit-user-select: text; user-select: text; }
+  .addr input::-webkit-input-placeholder { color: #6F7687; }
+  .addr button { min-height: 62px; padding: 0 24px; border-radius: 20px; background: rgba(255,255,255,0.14); font-weight: 600; font-size: 19px; }
+  #msg { min-height: 24px; margin-top: 14px; color: #FFB454; font-size: 16px; }
+
+  /* En vertical, el PC elegido arriba y la lista debajo. */
+  @media (max-aspect-ratio: 1/1) {
+    .app { flex-direction: column; }
+    aside { width: auto; min-width: 0; padding: 28px 28px 20px; }
+    .art { width: 46%; margin: 8px 0 0; }
+    h1 { font-size: 40px; }
+    main { padding: 24px 28px; }
+  }
+  @media (max-width: 600px) {
+    .tools { flex-direction: column; }
+    .tools > * + * { margin-left: 0; margin-top: 12px; }
+  }
 </style>
 </head>
 <body>
-<main>
-  <h1>Encaje<small>Abre Encaje en el PC y toca su nombre aquí.</small></h1>
-  <div id="msg"></div>
-  <section id="taken" hidden>
-    <h2 id="taken-text"></h2>
-    <button id="take">Usar en esta tablet</button>
-    <button id="add" hidden>Añadir como otro monitor</button>
-  </section>
-  <section>
-    <h2>En tu WiFi</h2>
-    <div id="pcs"></div>
-    <p id="scan-state"><span class="dot"></span>Buscando tu PC…</p>
-    <button id="more" class="quiet">¿No aparece? Escribir la dirección</button>
-    <div id="manual" hidden>
-      <p>Es la dirección que muestra Encaje en el PC.</p>
-      <div class="row"><input id="host" type="text" placeholder="192.168.1.50" autocomplete="off" autocapitalize="off" spellcheck="false"><button id="wifi-btn">Conectar</button></div>
+<div class="app">
+  <aside>
+    <div class="aurora a1"></div><div class="aurora a2"></div><div class="aurora a3"></div>
+    <div class="brand"><b>Encaje</b><button class="round" id="help" aria-label="Ayuda">?</button></div>
+
+    <svg class="art search" id="art" viewBox="0 0 300 190" width="300" height="190" aria-hidden="true">
+      <rect class="glow" x="178" y="58" width="120" height="134" rx="22" fill="#00C3E3" opacity=".25"></rect>
+      <rect x="20" y="10" width="190" height="122" rx="14" fill="none" stroke="#F4F5F8" stroke-opacity="0.8" stroke-width="4"></rect>
+      <path d="M95 132v22M70 156h80" fill="none" stroke="#F4F5F8" stroke-opacity="0.8" stroke-width="4" stroke-linecap="round"></path>
+      <rect class="tab" id="art-tab" x="190" y="70" width="96" height="110" rx="14" fill="#0C0D14" stroke="#8B93A7" stroke-width="5"></rect>
+      <rect id="art-screen" x="202" y="82" width="72" height="80" rx="6" fill="#8B93A7" fill-opacity="0.25"></rect>
+    </svg>
+
+    <div class="grow"></div>
+    <div class="kicker" id="kicker">Buscando</div>
+    <h1 id="title">Tu tablet, pantalla de tu PC.</h1>
+    <p class="lead" id="lead">Abre Encaje en el PC. Aparecerá a la derecha; si no, escanea su QR o escribe su dirección.</p>
+
+    <div class="actions" id="actions" hidden>
+      <button class="primary" id="use">
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#0B2A33" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="4" width="14" height="10" rx="2"></rect><path d="M6 18h6M9 14v4"></path><rect x="15" y="9" width="7" height="11" rx="1.5" fill="#0B2A33"></rect></svg>
+        <span id="use-text">Usar como monitor</span>
+      </button>
+      <div class="pair">
+        <button class="glass" id="add">
+          <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#F4F5F8" stroke-width="2" stroke-linecap="round" aria-hidden="true"><rect x="3" y="5" width="12" height="9" rx="1.5"></rect><path d="M19 8v8M15 12h8"></path></svg>
+          Añadir otro monitor
+        </button>
+        <button class="ghost" id="forget">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#D3D6DE" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M7 7l10 10M17 7L7 17"></path></svg>
+          Desconectar
+        </button>
+      </div>
     </div>
-  </section>
-  <section id="usb">
-    <h2>Por cable USB</h2>
-    <p id="usb-state"><span class="dot"></span>Buscando PC…</p>
-    <button id="usb-btn" disabled>Conectar por USB</button>
-  </section>
-  <label id="native-row" hidden><input type="checkbox" id="native"> Visor nativo (menos retraso; desmárcalo para usar el del navegador)</label>
-</main>
+
+    <label class="switch" id="native-row" hidden><input type="checkbox" id="native"><span class="track"></span>Visor nativo (menos retraso)</label>
+  </aside>
+
+  <main>
+    <div class="label" id="usb-label">Cable USB</div>
+    <div class="list" id="usb-list"></div>
+    <div class="label">En tu WiFi</div>
+    <div class="list" id="wifi-list"></div>
+    <div class="grow"></div>
+    <div class="tools">
+      <button class="scan glass" id="scan-qr" hidden>
+        <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="#F4F5F8" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"></rect><rect x="14" y="3" width="7" height="7" rx="1"></rect><rect x="3" y="14" width="7" height="7" rx="1"></rect><path d="M14 14h3v3h-3zM19 19h2v2h-2zM14 20h2M20 14v2"></path></svg>
+        Escanear QR del PC
+      </button>
+      <label class="addr">
+        <input id="host" type="text" placeholder="192.168.1.50" inputmode="decimal" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Dirección del PC">
+        <button id="wifi-btn">Ir</button>
+      </label>
+    </div>
+    <div id="msg"></div>
+  </main>
+</div>
 <script>
 "use strict";
 var DEFAULT_PORT = 8787, SCAN_PAUSE_MS = 8000;
 function $(id) { return document.getElementById(id); }
 function get(k, d) { try { var v = localStorage.getItem(k); return v === null ? d : v; } catch (_) { return d; } }
 function set(k, v) { try { localStorage.setItem(k, v); } catch (_) {} }
+var bridge = window.EncajeNative;
 
 // Al volver del visor sólo cambia el "#": hay que arrancar de nuevo.
 window.onhashchange = function () { location.reload(); };
@@ -72,28 +183,29 @@ window.onhashchange = function () { location.reload(); };
 // Al volver con "atrás" no se reconecta solo; tras un error sí. Si el monitor
 // lo usa otra tablet tampoco: quitárselo lo decide la persona.
 var taken = /^#(busy|replaced|full)\|([^|]*)\|([^|]*)\|(\d+)\|([01])$/.exec(location.hash);
-var auto = location.hash !== "#manual" && !taken;
-if (location.hash === "#error") $("msg").textContent = "Se perdió la conexión con el PC. Reintentando…";
-function offer(kind, by, host, port, extend) {
-  $("taken-text").textContent = kind === "full" ? "Ya no caben más monitores"
-    : (kind === "busy" ? "En uso en " : "Ahora se usa en ") + by;
-  $("taken").hidden = false;
-  $("take").hidden = kind === "full";
-  $("add").hidden = !extend;
-  $("take").onclick = function () { go(host, port, "pick"); };
-  $("add").onclick = function () { go(host, port, "extra"); };
-}
-if (taken) offer(taken[1], decodeURIComponent(taken[2]), taken[3], parseInt(taken[4], 10), taken[5] === "1");
+// Un QR leído con la cámara: "#qr|http://IP:PUERTO/#encaje&id=…&n=…&h=IP2,IP3".
+var qr = /^#qr\|(.+)$/.exec(location.hash);
+var auto = location.hash !== "#manual" && !taken && !qr;
+if (location.hash === "#error") say("Se perdió la conexión con el PC. Reintentando…");
+function say(text) { $("msg").textContent = text || ""; }
 
-// Aquí no se está conectado: si el PC dice que el monitor tiene dueño, es otra
-// tablet, y se ofrece sin tener que intentar conectar primero.
-function liveOffer(pc) {
-  if (taken) return;
-  if (pc && pc.owner) offer("busy", pc.owner, pc.host, pc.port, pc.extend);
-  else $("taken").hidden = true;
-}
+// ---- Hablar con un PC ----
 
+// Desde Java si se puede: el WebView moderno bloquea esta petición (página
+// local → IP privada). El XMLHttpRequest queda para versiones viejas de la app.
+var probes = {}, nextTicket = 1;
+window.encajeProbed = function (ticket, info) {
+  var done = probes[ticket];
+  delete probes[ticket];
+  if (done) done(info);
+};
 function probe(host, port, done) {
+  if (bridge && bridge.probe) {
+    var t = nextTicket++;
+    probes[t] = done;
+    bridge.probe(host, port, t);
+    return;
+  }
   var x = new XMLHttpRequest(), ended = false;
   function end(info) { if (!ended) { ended = true; done(info); } }
   x.open("GET", "http://" + host + ":" + port + "/info?" + Date.now());
@@ -110,38 +222,116 @@ function probe(host, port, done) {
 // Visor nativo de la app (MediaCodec directo a la pantalla) si está
 // disponible y elegido; si no, el web ("localhost" es contexto seguro: podrá
 // usar WebCodecs).
-var bridge = window.EncajeNative;
 if (bridge.webViewerWorks()) {
   $("native-row").hidden = false;
   $("native").checked = bridge.isEnabled();
   $("native").onchange = function () { bridge.setEnabled($("native").checked); };
 }
+var connecting = false;
 function go(host, port, mode) {
   connecting = true; // mientras se usa el visor no se busca nada
   if (bridge.open(host, port, mode)) return;
   location.href = "http://" + host + ":" + port + "/" + (mode === "auto" ? "" : "?" + mode + "=1");
 }
 
-// Acepta lo que se copie del PC: "http://192.168.1.50:8787/", "192.168.1.50:8787"
-// o "192.168.1.50".
-function parseAddress(text) {
-  var m = /^(?:https?:\/\/)?([^\/:\s]+)(?::(\d+))?\/?$/i.exec(text.replace(/^\s+|\s+$/g, ""));
-  return m ? { host: m[1], port: parseInt(m[2], 10) || DEFAULT_PORT } : null;
+// ---- Los PCs a la vista ----
+
+// key → { key, host, port, name, id, owner, extend, width, height, fps, usb }
+var usbPc = null, wifiPcs = [], selected = null, lastPc = bridge.lastPc();
+var usbMissing = !bridge.usbWorks();
+
+// Recién salido del visor el PC aún nos ve unos segundos como dueños: no es "otra tablet".
+var myName = bridge.deviceName ? bridge.deviceName() : "";
+function others(owner) { return owner && owner !== myName ? owner : ""; }
+// Con cable, ese mismo PC no se repite en la WiFi.
+function all() {
+  var wifi = usbPc ? wifiPcs.filter(function (pc) { return pc.id !== usbPc.id; }) : wifiPcs;
+  return (usbPc ? [usbPc] : []).concat(wifi);
+}
+var picked = false; // la persona tocó un PC: ya no se cambia solo
+function byKey(key) { var l = all(); for (var i = 0; i < l.length; i++) if (l[i].key === key) return l[i]; return null; }
+
+function row(pc) {
+  var b = document.createElement("button"), dot = document.createElement("span"),
+      txt = document.createElement("span"), small = document.createElement("small"), chev = document.createElement("span");
+  b.className = "row" + (selected === pc.key ? " on" : "");
+  dot.className = "dot " + (pc.owner ? "busy" : pc.usb ? "ok" : "");
+  txt.className = "txt";
+  txt.textContent = pc.name;
+  small.textContent = pc.owner ? "En uso en " + pc.owner
+    : pc.usb ? pc.width + "×" + pc.height + (pc.fps ? " · " + pc.fps + " fps" : "")
+    : pc.host + (pc.port !== DEFAULT_PORT ? ":" + pc.port : "");
+  txt.appendChild(small);
+  chev.className = "chev";
+  chev.textContent = "›";
+  b.appendChild(dot); b.appendChild(txt); b.appendChild(chev);
+  b.onclick = function () { selected = pc.key; picked = true; say(""); render(); };
+  return b;
 }
 
-function showPcs(pcs) {
-  var box = $("pcs");
-  box.textContent = "";
-  pcs.forEach(function (pc) {
-    var b = document.createElement("button"), small = document.createElement("small");
-    b.className = "pc";
-    b.textContent = pc.name;
-    small.textContent = pc.host;
-    b.appendChild(small);
-    b.onclick = function () { bridge.rememberPc(pc.id); go(pc.host, pc.port, "ask"); };
-    box.appendChild(b);
-  });
+function empty(text) {
+  var d = document.createElement("div"), dot = document.createElement("span");
+  d.className = "empty";
+  dot.className = "dot";
+  d.appendChild(dot);
+  d.appendChild(document.createTextNode(text));
+  return d;
 }
+
+function render() {
+  if (selected && !byKey(selected)) { selected = null; picked = false; }
+  if (!picked && all().length) selected = all()[0].key; // el cable primero
+
+  var u = $("usb-list"), w = $("wifi-list");
+  u.textContent = ""; w.textContent = "";
+  $("usb-label").hidden = u.hidden = !bridge.usbWorks();
+  if (usbPc) u.appendChild(row(usbPc)); else u.appendChild(empty("Enchufa la tablet al PC con un cable"));
+  all().forEach(function (pc) { if (!pc.usb) w.appendChild(row(pc)); });
+  w.appendChild(empty(wifiPcs.length ? "Buscando más…" : "Buscando tu PC en la WiFi…"));
+
+  showSelected(byKey(selected));
+}
+
+// La izquierda: el dibujo de la B, el nombre en grande y lo que se puede hacer.
+function showSelected(pc) {
+  var color = !pc ? "#8B93A7" : pc.owner ? "#FF9F0A" : "#00C3E3";
+  $("art").setAttribute("class", "art" + (pc ? "" : " search"));
+  $("art-tab").setAttribute("stroke", color);
+  $("art-screen").setAttribute("fill", color);
+  $("art").querySelector(".glow").setAttribute("fill", color);
+  $("actions").hidden = !pc;
+  if (!pc) {
+    $("kicker").textContent = "Buscando";
+    $("kicker").className = "kicker";
+    $("title").textContent = "Tu tablet, pantalla de tu PC.";
+    $("lead").textContent = "Abre Encaje en el PC. Aparecerá a la derecha; si no, escanea su QR o escribe su dirección.";
+    return;
+  }
+  var full = fullHost === pc.host;
+  $("kicker").textContent = full ? "Sin sitio" : pc.owner ? "En uso" : pc.usb ? "Por cable USB" : "En tu WiFi";
+  $("kicker").className = "kicker" + (pc.owner || full ? " warn" : "");
+  $("title").textContent = pc.name;
+  $("lead").textContent = full ? "Ya no caben más monitores en este PC."
+    : pc.owner ? "Lo está usando " + pc.owner + ". Puedes quitárselo o añadir esta tablet como otro monitor."
+    : (pc.width ? pc.width + " × " + pc.height + (pc.fps ? " · " + pc.fps + " fps" : "") + " · " : "") + "Monitor libre";
+  $("use").hidden = !!full;
+  $("use-text").textContent = pc.owner ? "Usar en esta tablet" : "Usar como monitor";
+  $("use").onclick = function () {
+    bridge.rememberPc(pc.usb ? "" : pc.id); // elegir el cable es no querer que la WiFi entre sola
+    go(pc.host, pc.port, pc.owner ? "pick" : "ask");
+  };
+  $("add").hidden = !pc.extend;
+  $("add").onclick = function () { go(pc.host, pc.port, "extra"); };
+  // Desconectar: que este PC deje de conectarse solo al abrir la app.
+  $("forget").onclick = function () {
+    bridge.rememberPc("");
+    lastPc = "";
+    auto = false;
+    say("Listo: " + pc.name + " ya no se conectará solo. Tócalo cuando quieras usarlo.");
+  };
+}
+
+// ---- WiFi: la búsqueda en la red y el PC de siempre ----
 
 // Un PC con cable y WiFi responde por dos direcciones: se muestra una sola.
 function uniquePcs(pcs) {
@@ -153,22 +343,22 @@ function uniquePcs(pcs) {
   });
 }
 
-// Si hay cable manda el cable: por WiFi sólo se conecta solo cuando ya se sabe
-// que por USB no hay nada.
-var connecting = false, nextScan = 0, usbMissing = !bridge.usbWorks();
+var nextScan = 0;
 function pollScan() {
   if (connecting) return;
-  var s = JSON.parse(bridge.scanState()), last = bridge.lastPc();
-  s.pcs = uniquePcs(s.pcs);
-  showPcs(s.pcs);
-  // El PC de siempre se conecta solo, aunque le haya cambiado la IP.
-  for (var i = 0; auto && usbMissing && i < s.pcs.length; i++) {
-    if (s.pcs[i].id === last) { go(s.pcs[i].host, s.pcs[i].port, "auto"); return; }
+  var s = JSON.parse(bridge.scanState());
+  var scanned = uniquePcs(s.pcs).map(function (pc) {
+    pc.key = "wifi:" + pc.id;
+    pc.owner = others(pc.owner);
+    return pc;
+  });
+  wifiPcs = uniquePcs(scanned.concat(extraPcs));
+  // Si hay cable manda el cable: por WiFi sólo se conecta solo cuando ya se
+  // sabe que por USB no hay nada. El PC de siempre entra aunque cambie su IP.
+  for (var i = 0; auto && usbMissing && i < scanned.length; i++) {
+    if (scanned[i].id === lastPc) { go(scanned[i].host, scanned[i].port, "auto"); return; }
   }
-  if (usbMissing) liveOffer(s.pcs.filter(function (pc) { return pc.owner; })[0]);
-  $("scan-state").innerHTML = s.pcs.length
-    ? '<span class="dot ok"></span>Toca tu PC para conectar.'
-    : '<span class="dot"></span>Buscando tu PC…';
+  render();
   if (!s.scanning && Date.now() >= nextScan) {
     nextScan = Date.now() + SCAN_PAUSE_MS;
     bridge.scan(DEFAULT_PORT);
@@ -176,43 +366,153 @@ function pollScan() {
   setTimeout(pollScan, 700);
 }
 
+// PCs que no salen en la búsqueda (otra subred) pero se encontraron por su
+// QR o escribiendo su dirección: se quedan en la lista.
+var extraPcs = [];
+function addFound(host, port, info, quiet) {
+  var pc = { key: "wifi:" + (info.id || host), host: host, port: port, name: info.name || host, id: info.id || host,
+    owner: others(info.owner), extend: !!info.extend, width: info.width, height: info.height, fps: info.fps };
+  extraPcs = extraPcs.filter(function (p) { return p.key !== pc.key; }).concat([pc]);
+  wifiPcs = uniquePcs(wifiPcs.filter(function (p) { return p.key !== pc.key; }).concat([pc]));
+  if (!quiet) {
+    selected = pc.key;
+    picked = true;
+    remember(host, port);
+  }
+  render();
+  return pc;
+}
+
+// Se guardan (los 5 últimos) para que sigan en la lista al volver del visor
+// o al abrir la app otro día, y se vuelven a preguntar de vez en cuando.
+function known() { try { return JSON.parse(get("known", "[]")); } catch (_) { return []; } }
+function remember(host, port) {
+  var list = known().filter(function (k) { return !(k.host === host && k.port === port); });
+  list.unshift({ host: host, port: port });
+  set("known", JSON.stringify(list.slice(0, 5)));
+}
+function pollKnown() {
+  if (connecting) return;
+  known().forEach(function (k) {
+    probe(k.host, k.port, function (info) {
+      if (connecting) return;
+      if (info) addFound(k.host, k.port, info, true);
+      else {
+        extraPcs = extraPcs.filter(function (p) { return p.host !== k.host || p.port !== k.port; });
+        render();
+      }
+    });
+  });
+  setTimeout(pollKnown, 5000);
+}
+
+// ---- USB ----
+
 function pollUsb() {
   if (connecting) return;
   probe("localhost", DEFAULT_PORT, function (info) {
     if (connecting) return;
     usbMissing = !info;
-    $("usb-state").innerHTML = info
-      ? '<span class="dot ok"></span>PC detectado · ' + info.width + "×" + info.height + " @ " + info.fps + " fps"
-      : '<span class="dot"></span>Buscando PC por USB…';
-    $("usb-btn").disabled = !info;
+    usbPc = info ? { key: "usb", usb: true, host: "localhost", port: DEFAULT_PORT, name: info.name || "Tu PC", id: info.id || "",
+      owner: others(info.owner), extend: !!info.extend, width: info.width, height: info.height, fps: info.fps } : null;
     if (info && auto) { go("localhost", DEFAULT_PORT, "auto"); return; }
-    if (info) liveOffer({ host: "localhost", port: DEFAULT_PORT, owner: info.owner, extend: info.extend });
+    render();
     setTimeout(pollUsb, 1500);
   });
 }
 
-$("more").onclick = function () {
-  $("more").hidden = true;
-  $("manual").hidden = false;
-  $("host").focus();
-};
-// Elegir el cable es no querer que la WiFi vuelva a entrar sola.
-$("usb-btn").onclick = function () { bridge.rememberPc(""); go("localhost", DEFAULT_PORT, "ask"); };
+// ---- El QR y la dirección escrita ----
+
+if (bridge.canScan && bridge.canScan()) {
+  $("scan-qr").hidden = false;
+  $("scan-qr").onclick = function () { bridge.scanQr(); };
+}
+
+// Lo que lleva el QR: la IP principal en la dirección y las demás en "h".
+function parseQr(text) {
+  var m = /^https?:\/\/([^\/:]+)(?::(\d+))?\/?#encaje(.*)$/.exec(text);
+  if (!m) return null;
+  var out = { hosts: [m[1]], port: parseInt(m[2], 10) || DEFAULT_PORT, id: "", name: m[1] };
+  m[3].split("&").forEach(function (kv) {
+    var i = kv.indexOf("="), k = kv.slice(0, i), v = decodeURIComponent(kv.slice(i + 1));
+    if (k === "id") out.id = v;
+    else if (k === "n") out.name = v;
+    else if (k === "h") out.hosts = out.hosts.concat(v.split(","));
+  });
+  return out;
+}
+
+// Se prueban todas a la vez y gana la primera que responde (cable o WiFi).
+// Si el monitor está libre se conecta ya; si no, se queda elegido a la izquierda.
+function connectQr(link) {
+  var pc = parseQr(link);
+  if (!pc) { say("Ese QR no es de Encaje."); return; }
+  say("Conectando con " + pc.name + "…");
+  var left = pc.hosts.length, won = false;
+  pc.hosts.forEach(function (host) {
+    probe(host, pc.port, function (info) {
+      left--;
+      if (won) return;
+      if (info) {
+        won = true;
+        var found = addFound(host, pc.port, info);
+        bridge.rememberPc(found.id);
+        lastPc = found.id;
+        if (found.owner) say("");
+        else go(host, pc.port, "ask");
+      } else if (!left) {
+        say("No responde " + pc.name + " (" + pc.hosts.join(", ") + "). ¿Está la tablet en la misma WiFi que el PC?");
+      }
+    });
+  });
+}
+
+// Acepta lo que se copie del PC: "http://192.168.1.50:8787/", "192.168.1.50:8787"
+// o "192.168.1.50".
+function parseAddress(text) {
+  var m = /^(?:https?:\/\/)?([^\/:\s]+)(?::(\d+))?\/?$/i.exec(text.replace(/^\s+|\s+$/g, ""));
+  return m ? { host: m[1], port: parseInt(m[2], 10) || DEFAULT_PORT } : null;
+}
+
 $("host").value = get("host", "");
+$("host").onkeydown = function (e) { if (e.keyCode === 13) $("wifi-btn").onclick(); };
 $("wifi-btn").onclick = function () {
   var a = parseAddress($("host").value);
-  if (!a) { $("msg").textContent = "Escribe la dirección del PC, por ejemplo 192.168.1.50."; return; }
-  set("host", $("host").value);
-  $("msg").textContent = "Conectando…";
+  if (!a) { say("Escribe la dirección del PC, por ejemplo 192.168.1.50."); return; }
+  $("host").blur();
+  say("Buscando " + a.host + "…");
   probe(a.host, a.port, function (info) {
-    if (info) { if (info.id) bridge.rememberPc(info.id); go(a.host, a.port, "ask"); }
-    else $("msg").textContent = "No se pudo contactar con " + a.host + ":" + a.port + ". ¿Está Encaje abierto en el PC y el cortafuegos permite la conexión?";
+    if (!info) { say("No se pudo contactar con " + a.host + ":" + a.port + ". ¿Está Encaje abierto en el PC y en la misma WiFi?"); return; }
+    set("host", $("host").value);
+    var pc = addFound(a.host, a.port, info);
+    bridge.rememberPc(pc.id);
+    lastPc = pc.id;
+    say("");
+    if (!pc.owner) go(a.host, a.port, "ask");
   });
 };
 
+$("help").onclick = function () {
+  say("Cable: activa la depuración USB y enchufa la tablet. WiFi: toca tu PC a la derecha o escanea el QR (en el PC, botón QR de la ventana de Encaje).");
+};
+
+// ---- Arranque ----
+
+// Volvió del visor porque el monitor está ocupado (o no caben más): ese PC
+// queda elegido a la izquierda con sus opciones.
+var fullHost = null;
+if (taken) {
+  if (taken[1] === "full") fullHost = taken[3];
+  if (taken[3] === "localhost") { selected = "usb"; picked = true; }
+  else probe(taken[3], parseInt(taken[4], 10), function (info) {
+    if (info) addFound(taken[3], parseInt(taken[4], 10), info);
+  });
+}
+if (qr) connectQr(decodeURIComponent(qr[1]));
+render();
 pollScan();
+pollKnown();
 if (bridge.usbWorks()) pollUsb();
-else $("usb").hidden = true;
 </script>
 </body>
 </html>

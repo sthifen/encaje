@@ -114,9 +114,32 @@ final class PcFinder {
 
     /** Pide /info; {@code null} si ahí no hay un servidor de Encaje. */
     private static JSONObject probe(String host, int port) {
+        try {
+            JSONObject info = info(host, port, CONNECT_MS, READ_MS);
+            if (info == null) return null;
+            return new JSONObject()
+                    .put("host", host)
+                    .put("port", port)
+                    .put("name", info.optString("name", host))
+                    .put("id", info.optString("id", host))
+                    .put("owner", info.optString("owner", ""))
+                    .put("extend", info.optBoolean("extend"))
+                    .put("width", info.optInt("width"))
+                    .put("height", info.optInt("height"));
+        } catch (JSONException e) {
+            return null;
+        }
+    }
+
+    /**
+     * El /info tal cual, o {@code null}. Va por un socket propio y no por el
+     * WebView: los WebView recientes (Chrome 142+, «Local Network Access»)
+     * bloquean las peticiones de la página local del lanzador a IP privadas.
+     */
+    static JSONObject info(String host, int port, int connectMs, int readMs) {
         try (Socket s = new Socket()) {
-            s.connect(new InetSocketAddress(host, port), CONNECT_MS);
-            s.setSoTimeout(READ_MS);
+            s.connect(new InetSocketAddress(host, port), connectMs);
+            s.setSoTimeout(readMs);
             OutputStream out = s.getOutputStream();
             out.write(("GET /info HTTP/1.0\r\nHost: " + host + "\r\n\r\n").getBytes(StandardCharsets.US_ASCII));
             out.flush();
@@ -128,16 +151,7 @@ final class PcFinder {
             int start = text.indexOf("\r\n\r\n");
             if (start < 0) return null;
             JSONObject info = new JSONObject(text.substring(start + 4));
-            if (!info.has("auto_size")) return null; // otro servicio en ese puerto
-            return new JSONObject()
-                    .put("host", host)
-                    .put("port", port)
-                    .put("name", info.optString("name", host))
-                    .put("id", info.optString("id", host))
-                    .put("owner", info.optString("owner", ""))
-                    .put("extend", info.optBoolean("extend"))
-                    .put("width", info.optInt("width"))
-                    .put("height", info.optInt("height"));
+            return info.has("auto_size") ? info : null; // si no, otro servicio en ese puerto
         } catch (IOException | JSONException e) {
             return null;
         }

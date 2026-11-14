@@ -47,6 +47,22 @@ fetch() { # fetch <zip> <destino>
 [[ -x "$BT/aapt2" ]] || fetch "$BT_ZIP" "$BT"
 [[ -f "$ANDROID_JAR" ]] || fetch "$PLATFORM_ZIP" "$SDK/platforms/$PLATFORM"
 
+# ZXing (Apache-2.0) para leer el QR que enseña el PC (src-camera/).
+ZXING_VER=3.5.3
+ZXING_SHA256=8d8064c1636fdaef7189dd9055c7d59950a8940a12f2293956446ec3c109fd82
+ZXING="$SDK/../encaje-libs/zxing-core-$ZXING_VER.jar"
+if [[ ! -f "$ZXING" ]]; then
+  mkdir -p "$(dirname "$ZXING")"
+  if [[ -f "$SDK/../synctablet-libs/zxing-core-$ZXING_VER.jar" ]]; then
+    cp "$SDK/../synctablet-libs/zxing-core-$ZXING_VER.jar" "$ZXING.tmp"
+  else
+    echo "→ descargando ZXing $ZXING_VER"
+    curl -fL --progress-bar "https://repo1.maven.org/maven2/com/google/zxing/core/$ZXING_VER/core-$ZXING_VER.jar" -o "$ZXING.tmp"
+  fi
+  echo "$ZXING_SHA256  $ZXING.tmp" | sha256sum -c --quiet - || { rm -f "$ZXING.tmp"; echo "ZXing no coincide con su huella" >&2; exit 1; }
+  mv "$ZXING.tmp" "$ZXING"
+fi
+
 # javac: usa el del sistema si existe; si no, el módulo jdk.compiler del JRE.
 if command -v javac >/dev/null; then JAVAC=(javac); else JAVAC=(java -m jdk.compiler/com.sun.tools.javac.Main); fi
 
@@ -61,16 +77,16 @@ echo "→ recursos"
 
 echo "→ java"
 "${JAVAC[@]}" -source 17 -target 17 -nowarn -Xlint:-options -encoding UTF-8 \
-  -classpath "$ANDROID_JAR" -d "$OUT/classes" \
-  $(find "$HERE/src" "$OUT/gen" -name '*.java')
+  -classpath "$ANDROID_JAR:$ZXING" -d "$OUT/classes" \
+  $(find "$HERE/src" "$HERE/src-camera" "$OUT/gen" -name '*.java')
 "${JAVAC[@]}" -source 17 -target 17 -nowarn -Xlint:-options -encoding UTF-8 \
   -classpath "$ANDROID_JAR" -d "$OUT/server-classes" \
   $(find "$HERE/server" -name '*.java')
 
 echo "→ dex"
 "$BT/d8" --release --min-api $MIN_SDK --lib "$ANDROID_JAR" --output "$OUT/dex" \
-  $(find "$OUT/classes" -name '*.class')
-(cd "$OUT/dex" && zip -q "$OUT/base.apk" classes.dex)
+  $(find "$OUT/classes" -name '*.class') "$ZXING"
+(cd "$OUT/dex" && zip -q "$OUT/base.apk" classes*.dex)
 mkdir -p "$OUT/server-dex"
 "$BT/d8" --release --min-api $SERVER_MIN_SDK --lib "$ANDROID_JAR" --output "$OUT/server-dex" \
   $(find "$OUT/server-classes" -name '*.class')

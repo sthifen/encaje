@@ -183,6 +183,35 @@ public class MainActivity extends Activity {
             return finder.state();
         }
 
+        /**
+         * Pregunta /info a un PC y avisa al lanzador con
+         * {@code encajeProbed(ticket, info|null)}. Desde Java porque el WebView
+         * no deja a la página local hablar con IP privadas.
+         */
+        @JavascriptInterface
+        public void probe(String host, int port, int ticket) {
+            new Thread(() -> {
+                org.json.JSONObject info = PcFinder.info(host, port, 1200, 1500);
+                String js = "window.encajeProbed && encajeProbed(" + ticket + "," + (info == null ? "null" : info.toString()) + ")";
+                runOnUiThread(() -> {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) web.evaluateJavascript(js, null);
+                    else web.loadUrl("javascript:" + js);
+                });
+            }, "encaje-probe").start();
+        }
+
+        /** Leer el QR del PC necesita Camera2 (Android 5) y una cámara. */
+        @JavascriptInterface
+        public boolean canScan() {
+            return Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP
+                    && getPackageManager().hasSystemFeature(android.content.pm.PackageManager.FEATURE_CAMERA_ANY);
+        }
+
+        @JavascriptInterface
+        public void scanQr() {
+            runOnUiThread(() -> startActivityForResult(new Intent(MainActivity.this, QrScanActivity.class), REQUEST_QR));
+        }
+
         @JavascriptInterface
         public void setEnabled(boolean on) {
             prefs().edit().putBoolean("native", on).apply();
@@ -207,7 +236,7 @@ public class MainActivity extends Activity {
         }
     }
 
-    private static final int REQUEST_NATIVE = 1;
+    private static final int REQUEST_NATIVE = 1, REQUEST_QR = 2;
 
     private void showTaken(String kind, String by, String host, int port, boolean extra) {
         web.loadUrl(LAUNCHER + "#" + kind + "|" + Uri.encode(by) + "|" + host + "|" + port + "|" + (extra ? 1 : 0));
@@ -226,6 +255,13 @@ public class MainActivity extends Activity {
     @Override
     protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
+        if (request == REQUEST_QR) {
+            // El lanzador prueba las IP del QR y se conecta a la que responda.
+            if (result == RESULT_OK && data != null && data.getStringExtra(QrScanActivity.EXTRA_LINK) != null) {
+                web.loadUrl(LAUNCHER + "#qr|" + Uri.encode(data.getStringExtra(QrScanActivity.EXTRA_LINK)));
+            }
+            return;
+        }
         if (request != REQUEST_NATIVE) return;
         if (result == NativeViewerActivity.RESULT_WEB && data != null) {
             // "Usar el visor web" desde el menú del nativo: sólo esta vez.

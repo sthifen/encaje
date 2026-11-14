@@ -1,6 +1,6 @@
 [package]
 name = "encaje"
-version = "0.11.1"
+version = "0.12.0"
 edition = "2024"
 
 [dependencies]
@@ -19,6 +19,7 @@ gstreamer-app = "0.25.2"
 gstreamer-video = "0.25.4"
 openh264 = "0.9.8"
 pipewire = "0.10.1"
+qrcode = { version = "0.14.1", default-features = false }
 rtc = "0.21.1"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
